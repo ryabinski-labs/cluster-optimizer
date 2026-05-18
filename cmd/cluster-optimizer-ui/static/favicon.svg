@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Cluster Optimizer">
+  <rect width="64" height="64" rx="14" fill="#171a1f"/>
+  <path d="M13 45h38M13 33h38M13 21h38M19 13v38M32 13v38M45 13v38" fill="none" stroke="#f4f1e8" stroke-opacity=".16" stroke-width="2"/>
+  <path d="M17 43c6-1 10-7 15-12s9-8 15-10" fill="none" stroke="#2f9f6b" stroke-linecap="round" stroke-width="6"/>
+  <path d="M17 43c6-1 10-7 15-12s9-8 15-10" fill="none" stroke="#f4f1e8" stroke-linecap="round" stroke-width="2"/>
+  <circle cx="17" cy="43" r="5" fill="#a83b34"/>
+  <circle cx="32" cy="31" r="5" fill="#956518"/>
+  <circle cx="47" cy="21" r="6" fill="#2f9f6b"/>
+  <path d="M21 43h7M36 31h7M49 17v8" fill="none" stroke="#f4f1e8" stroke-linecap="round" stroke-width="2.5"/>
+</svg>
