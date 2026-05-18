@@ -150,7 +150,8 @@ AWS infrastructure, and Kubernetes deployment:
   optional AWS Secret, and CronJob.
 
 All jobs use `runs-on: self-hosted`. The existing actions runner image should
-include Docker, kubectl, AWS CLI, gh, and doctl. CI installs Go through
+include Docker, kubectl, AWS CLI, gh, doctl, an AWS profile for infrastructure
+deployment, and a kubeconfig for the DOKS cluster. CI installs Go through
 `actions/setup-go`, so Go does not need to be baked into the runner image.
 
 Repository variables:
@@ -159,41 +160,16 @@ Repository variables:
 
 Repository secrets:
 
-- `AWS_DEPLOY_ROLE_ARN`: IAM role ARN assumed by GitHub Actions through OIDC
-  for CloudFormation deployments.
-- `DOKS_KUBECONFIG_B64`: base64-encoded kubeconfig for the target DOKS cluster.
+- `DOKS_KUBECONFIG_B64`: optional base64-encoded kubeconfig for the target DOKS
+  cluster. If unset, the workflow uses the runner's existing kubeconfig.
 - `CLUSTER_OPTIMIZER_AWS_ACCESS_KEY_ID`: runtime access key for the
   in-cluster optimizer when DynamoDB persistence is enabled.
 - `CLUSTER_OPTIMIZER_AWS_SECRET_ACCESS_KEY`: matching runtime secret key.
 - `GHCR_PULL_TOKEN`: optional GitHub token with package read access. Set this
   only if the GHCR package is private.
 
-The infra workflow uses short-lived AWS credentials through GitHub OIDC. If the
-AWS account does not already have the GitHub OIDC provider, create it once:
-
-```bash
-aws iam create-open-id-connect-provider \
-  --url https://token.actions.githubusercontent.com \
-  --client-id-list sts.amazonaws.com
-```
-
-Then create the deploy role and save the `RoleArn` output as
-`AWS_DEPLOY_ROLE_ARN`:
-
-```bash
-aws cloudformation deploy \
-  --stack-name cluster-optimizer-github-deploy-role \
-  --template-file infra/cloudformation/github-actions-deploy-role.yaml \
-  --parameter-overrides \
-    GitHubOwner=GipsyChef \
-    GitHubRepo=cluster-optimizer \
-    GitHubRef=refs/heads/main \
-    TableName=cluster-optimizer-reports \
-    PolicyName=cluster-optimizer-dynamodb-writer \
-  --capabilities CAPABILITY_NAMED_IAM
-```
-
-Create the kubeconfig secret from a local kubeconfig:
+Create the kubeconfig secret only when the runner does not already have cluster
+access:
 
 ```bash
 base64 -i ~/.kube/config | gh secret set DOKS_KUBECONFIG_B64

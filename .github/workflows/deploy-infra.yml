@@ -16,7 +16,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   deploy:
@@ -34,16 +33,7 @@ jobs:
             echo "AWS_REGION repository variable is required."
             exit 1
           }
-          test -n "${{ secrets.AWS_DEPLOY_ROLE_ARN }}" || {
-            echo "AWS_DEPLOY_ROLE_ARN repository secret is required."
-            exit 1
-          }
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws sts get-caller-identity
 
       - name: Deploy DynamoDB table
         run: |
