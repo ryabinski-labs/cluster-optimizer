@@ -6,11 +6,46 @@
       "workload": "Deployment/echothread-api",
       "repository": "GipsyChef/echothread",
       "manifest_path": "api.yml",
+      "instructions_path": "docs/cluster-optimizer/echothread-api-rewrite-instructions.md",
       "container": "echothread-api",
       "supported_rules": [
         "memory-request-below-usage",
         "cpu-request-over-provisioned",
-        "single-replica-pdb-blocks-drain"
+        "single-replica-pdb-blocks-drain",
+        "runtime-modernization-candidate"
+      ]
+    },
+    {
+      "cluster_id": "default",
+      "namespace": "default",
+      "workload": "Deployment/nightlamp-api",
+      "repository": "GipsyChef/nightlamp",
+      "instructions_path": "docs/cluster-optimizer/nightlamp-api-rewrite-instructions.md",
+      "container": "nightlamp-api",
+      "supported_rules": [
+        "runtime-modernization-candidate"
+      ]
+    },
+    {
+      "cluster_id": "default",
+      "namespace": "default",
+      "workload": "Deployment/siftfy-platform",
+      "repository": "GipsyChef/siftfy-python",
+      "instructions_path": "docs/cluster-optimizer/siftfy-platform-rewrite-instructions.md",
+      "container": "siftfy-platform",
+      "supported_rules": [
+        "runtime-modernization-candidate"
+      ]
+    },
+    {
+      "cluster_id": "default",
+      "namespace": "default",
+      "workload": "Deployment/spam-detector",
+      "repository": "GipsyChef/spam-detector",
+      "instructions_path": "docs/cluster-optimizer/spam-detector-rewrite-instructions.md",
+      "container": "spam-detector",
+      "supported_rules": [
+        "runtime-modernization-candidate"
       ]
     }
   ]

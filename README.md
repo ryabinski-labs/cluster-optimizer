@@ -163,6 +163,9 @@ AWS infrastructure, and Kubernetes deployment:
 - `.github/workflows/remediate-api-yml.yml`: creates a pull request against an
   application repository for supported api.yml changes after the UI dispatches
   an approved remediation.
+- `.github/workflows/generate-rewrite-instructions.yml`: creates a planning PR
+  in an application repository with `instructions.md` for runtime
+  modernization recommendations such as Go rewrites.
 
 All jobs use `runs-on: self-hosted`. The existing actions runner image should
 include Docker, kubectl, AWS CLI, gh, doctl, an AWS profile for infrastructure
@@ -223,12 +226,22 @@ Supported first-pass remediations are intentionally narrow:
 - CPU request tuning in `api.yml`.
 - Memory request tuning in `api.yml`.
 - Single-replica PDB drain fixes in `api.yml`.
+- Runtime modernization planning for persistent rewrite candidates. This
+  creates a coding-agent instructions file, not implementation code.
 
 Workloads must be mapped before the button can become available. Edit
 `config/remediation-targets.json` to point a Kubernetes workload at its
-application repository, manifest path, and container name. When clicked, the UI
-dispatches `.github/workflows/remediate-api-yml.yml`; that workflow checks out
-the target repo, patches `api.yml`, and opens a PR.
+application repository, manifest path, instructions path, and container name.
+When clicked, the UI dispatches either `.github/workflows/remediate-api-yml.yml`
+for manifest changes or `.github/workflows/generate-rewrite-instructions.yml`
+for runtime modernization planning.
+
+Rewrite planning PRs create a detailed `instructions.md` for a coding agent.
+The file includes the observed cluster evidence, performance-engineering
+baseline requirements, architecture constraints, implementation guardrails,
+deep QA requirements, rollout and rollback expectations, and acceptance
+criteria. These PRs are planning-only; implementation should happen in a
+separate reviewed branch after profiling and owner approval.
 
 For local UI dispatch, either export `GITHUB_TOKEN` / `GH_TOKEN` or authenticate
 the GitHub CLI with `gh auth login`. The in-repository workflow still needs

@@ -280,16 +280,17 @@ function remediationRow(finding, rollup, remediation) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "remediate-button";
-  button.textContent = "Remediate";
+  button.textContent = remediation?.button_label || "Remediate";
   button.disabled = !remediation?.available;
-  button.title = remediation?.available ? "Create an api.yml pull request through CI/CD" : status.textContent;
+  button.title = remediation?.available ? actionTitle(remediation) : status.textContent;
   button.addEventListener("click", () => dispatchRemediation(finding, button, status));
   row.append(status, button);
   return row;
 }
 
 async function dispatchRemediation(finding, button, status) {
-  const confirmed = window.confirm(`Create an api.yml remediation PR for ${scope(finding)}?`);
+  const action = button.textContent || "Remediate";
+  const confirmed = window.confirm(`${action} for ${scope(finding)}?`);
   if (!confirmed) return;
   button.disabled = true;
   const original = button.textContent;
@@ -317,6 +318,13 @@ async function dispatchRemediation(finding, button, status) {
     button.textContent = original;
     button.disabled = false;
   }
+}
+
+function actionTitle(remediation) {
+  if (remediation?.action === "rewrite_plan") {
+    return "Create coding-agent rewrite instructions through CI/CD";
+  }
+  return "Create an api.yml pull request through CI/CD";
 }
 
 function filteredFindings(findings) {

@@ -1,0 +1,109 @@
+name: Generate Rewrite Instructions
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_id:
+        description: Cluster identifier that produced the recommendation.
+        required: true
+        type: string
+      namespace:
+        description: Kubernetes namespace.
+        required: true
+        type: string
+      workload:
+        description: Workload in Kind/name form.
+        required: true
+        type: string
+      repository:
+        description: Target repository, for example GipsyChef/echothread.
+        required: true
+        type: string
+      instructions_path:
+        description: instructions.md path in the target repository.
+        required: true
+        type: string
+      context_json:
+        description: JSON context from Cluster Optimizer.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Create rewrite instructions PR
+    runs-on: self-hosted
+    steps:
+      - name: Checkout optimizer
+        uses: actions/checkout@v5
+        with:
+          path: optimizer
+
+      - name: Checkout target repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository }}
+          token: ${{ secrets.REMEDIATION_GITHUB_TOKEN }}
+          path: target
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: optimizer/go.mod
+          cache-dependency-path: optimizer/go.sum
+
+      - name: Generate instructions.md
+        working-directory: optimizer
+        env:
+          CONTEXT_JSON: ${{ inputs.context_json }}
+        run: |
+          go run ./cmd/rewrite-instructions-generator \
+            --output "../target/${{ inputs.instructions_path }}" \
+            --cluster-id "${{ inputs.cluster_id }}" \
+            --namespace "${{ inputs.namespace }}" \
+            --workload "${{ inputs.workload }}" \
+            --context-json "${CONTEXT_JSON}"
+
+      - name: Create pull request
+        working-directory: target
+        env:
+          GH_TOKEN: ${{ secrets.REMEDIATION_GITHUB_TOKEN }}
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          WORKLOAD: ${{ inputs.workload }}
+          NAMESPACE: ${{ inputs.namespace }}
+          INSTRUCTIONS_PATH: ${{ inputs.instructions_path }}
+          CONTEXT_JSON: ${{ inputs.context_json }}
+        run: |
+          branch="cluster-optimizer/rewrite-plan-${GITHUB_RUN_ID}"
+          git config user.name "cluster-optimizer"
+          git config user.email "cluster-optimizer@users.noreply.github.com"
+          git checkout -b "${branch}"
+          git add "${INSTRUCTIONS_PATH}"
+          git diff --cached --quiet && {
+            echo "No instructions changes produced."
+            exit 1
+          }
+          git commit -m "Add rewrite instructions for ${WORKLOAD}"
+          git push --set-upstream origin "${branch}"
+          {
+            echo "Cluster Optimizer observed a persistent runtime modernization recommendation and generated a coding-agent instruction file."
+            echo
+            echo "- Namespace: ${NAMESPACE}"
+            echo "- Workload: ${WORKLOAD}"
+            echo "- Instructions: ${INSTRUCTIONS_PATH}"
+            echo "- Context:"
+            echo
+            echo '```json'
+            printf '%s\n' "${CONTEXT_JSON}"
+            echo '```'
+            echo
+            echo "This PR is planning-only. Do not merge implementation changes without profiling, architecture review, deep QA, canary validation, and rollback evidence."
+          } > /tmp/cluster-optimizer-rewrite-pr-body.md
+          gh pr create \
+            --repo "${TARGET_REPOSITORY}" \
+            --base main \
+            --head "${branch}" \
+            --title "Add rewrite instructions for ${WORKLOAD}" \
+            --body-file /tmp/cluster-optimizer-rewrite-pr-body.md

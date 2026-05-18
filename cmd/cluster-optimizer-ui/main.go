@@ -88,25 +88,30 @@ type recommendationRollup struct {
 }
 
 type remediationSummary struct {
-	Supported      bool              `json:"supported"`
-	Available      bool              `json:"available"`
-	Reason         string            `json:"reason"`
-	TargetRepo     string            `json:"target_repo,omitempty"`
-	ManifestPath   string            `json:"manifest_path,omitempty"`
-	Container      string            `json:"container,omitempty"`
-	TargetCPU      string            `json:"target_cpu,omitempty"`
-	TargetMemory   string            `json:"target_memory,omitempty"`
-	WorkflowInputs map[string]string `json:"workflow_inputs,omitempty"`
+	Supported        bool              `json:"supported"`
+	Available        bool              `json:"available"`
+	Action           string            `json:"action,omitempty"`
+	ButtonLabel      string            `json:"button_label,omitempty"`
+	Reason           string            `json:"reason"`
+	TargetRepo       string            `json:"target_repo,omitempty"`
+	ManifestPath     string            `json:"manifest_path,omitempty"`
+	InstructionsPath string            `json:"instructions_path,omitempty"`
+	Container        string            `json:"container,omitempty"`
+	TargetCPU        string            `json:"target_cpu,omitempty"`
+	TargetMemory     string            `json:"target_memory,omitempty"`
+	Workflow         string            `json:"workflow,omitempty"`
+	WorkflowInputs   map[string]string `json:"workflow_inputs,omitempty"`
 }
 
 type remediationTarget struct {
-	ClusterID      string   `json:"cluster_id"`
-	Namespace      string   `json:"namespace"`
-	Workload       string   `json:"workload"`
-	Repository     string   `json:"repository"`
-	ManifestPath   string   `json:"manifest_path"`
-	Container      string   `json:"container"`
-	SupportedRules []string `json:"supported_rules"`
+	ClusterID        string   `json:"cluster_id"`
+	Namespace        string   `json:"namespace"`
+	Workload         string   `json:"workload"`
+	Repository       string   `json:"repository"`
+	ManifestPath     string   `json:"manifest_path"`
+	InstructionsPath string   `json:"instructions_path"`
+	Container        string   `json:"container"`
+	SupportedRules   []string `json:"supported_rules"`
 }
 
 type remediationTargetsFile struct {
@@ -136,6 +141,7 @@ type server struct {
 	minRemediationDays int
 	githubRepository   string
 	githubWorkflow     string
+	rewriteWorkflow    string
 	githubRef          string
 }
 
@@ -152,6 +158,7 @@ func run(ctx context.Context, args []string) error {
 	var remediationTargetsPath string
 	var githubRepository string
 	var githubWorkflow string
+	var rewriteWorkflow string
 	var githubRef string
 	var minRemediationDays int
 	flags := flag.NewFlagSet("cluster-optimizer-ui", flag.ContinueOnError)
@@ -162,6 +169,7 @@ func run(ctx context.Context, args []string) error {
 	flags.IntVar(&minRemediationDays, "min-remediation-days", envIntOr("MIN_REMEDIATION_DAYS", 3), "minimum observed days before remediation can be dispatched")
 	flags.StringVar(&githubRepository, "github-repository", envOr("GITHUB_REPOSITORY", "GipsyChef/cluster-optimizer"), "repository that owns the remediation workflow")
 	flags.StringVar(&githubWorkflow, "github-workflow", envOr("REMEDIATION_WORKFLOW", "remediate-api-yml.yml"), "GitHub Actions workflow file to dispatch")
+	flags.StringVar(&rewriteWorkflow, "rewrite-workflow", envOr("REWRITE_PLAN_WORKFLOW", "generate-rewrite-instructions.yml"), "GitHub Actions workflow file that creates coding-agent rewrite instructions")
 	flags.StringVar(&githubRef, "github-ref", envOr("REMEDIATION_WORKFLOW_REF", "main"), "Git ref for workflow_dispatch")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -188,6 +196,7 @@ func run(ctx context.Context, args []string) error {
 		minRemediationDays: minRemediationDays,
 		githubRepository:   githubRepository,
 		githubWorkflow:     githubWorkflow,
+		rewriteWorkflow:    rewriteWorkflow,
 		githubRef:          githubRef,
 	}
 
@@ -279,11 +288,15 @@ func (s *server) handleRemediation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusPreconditionFailed, err.Error())
 		return
 	}
-	if err := s.dispatchRemediation(ctx, token, rollup.Remediation.WorkflowInputs); err != nil {
+	workflow := rollup.Remediation.Workflow
+	if workflow == "" {
+		workflow = s.githubWorkflow
+	}
+	if err := s.dispatchWorkflow(ctx, token, workflow, rollup.Remediation.WorkflowInputs); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	workflowURL := fmt.Sprintf("https://github.com/%s/actions/workflows/%s", s.githubRepository, s.githubWorkflow)
+	workflowURL := fmt.Sprintf("https://github.com/%s/actions/workflows/%s", s.githubRepository, workflow)
 	writeJSON(w, http.StatusAccepted, remediationResponse{Status: "dispatched", WorkflowURL: workflowURL, Remediation: rollup.Remediation})
 }
 
@@ -436,17 +449,26 @@ func (s *server) remediationFor(rollup recommendationRollup) remediationSummary 
 		target, targetFound = s.remediationTargets[targetKey("default", rollup.Namespace, rollup.Workload)]
 	}
 	if !targetFound {
-		return remediationSummary{Supported: false, Available: false, Reason: "No api.yml remediation target is configured for this workload."}
+		return remediationSummary{Supported: false, Available: false, Reason: "No remediation target is configured for this workload."}
+	}
+	if rollup.RuleID == "runtime-modernization-candidate" {
+		return s.rewritePlanFor(rollup, target)
 	}
 	if !ruleSupported(target, rollup.RuleID) || !ruleCanPatchAPIYAML(rollup.RuleID) {
 		return remediationSummary{Supported: false, Available: false, Reason: "This recommendation is not implemented as an api.yml patch yet."}
 	}
+	if target.ManifestPath == "" {
+		return remediationSummary{Supported: false, Available: false, Reason: "No manifest_path is configured for this api.yml remediation."}
+	}
 	remediation := remediationSummary{
 		Supported:    true,
 		Available:    false,
+		Action:       "api_yml_patch",
+		ButtonLabel:  "Remediate",
 		TargetRepo:   target.Repository,
 		ManifestPath: target.ManifestPath,
 		Container:    target.Container,
+		Workflow:     s.githubWorkflow,
 	}
 	if !rollup.LatestReportHas {
 		remediation.Reason = "The latest report no longer contains this recommendation."
@@ -490,6 +512,64 @@ func (s *server) remediationFor(rollup recommendationRollup) remediationSummary 
 	return remediation
 }
 
+func (s *server) rewritePlanFor(rollup recommendationRollup, target remediationTarget) remediationSummary {
+	remediation := remediationSummary{
+		Supported:        true,
+		Available:        false,
+		Action:           "rewrite_plan",
+		ButtonLabel:      "Plan Rewrite",
+		TargetRepo:       target.Repository,
+		InstructionsPath: target.InstructionsPath,
+		Workflow:         s.rewriteWorkflow,
+	}
+	if !ruleSupported(target, rollup.RuleID) {
+		remediation.Supported = false
+		remediation.Reason = "This target does not allow rewrite planning for this rule."
+		return remediation
+	}
+	if target.InstructionsPath == "" {
+		remediation.Supported = false
+		remediation.Reason = "No instructions_path is configured for this workload."
+		return remediation
+	}
+	if !rollup.LatestReportHas {
+		remediation.Reason = "The latest report no longer contains this recommendation."
+		return remediation
+	}
+	if rollup.ObservedDays < s.minRemediationDays {
+		remediation.Reason = fmt.Sprintf("Observed for %d day(s); rewrite planning unlocks after %d days.", rollup.ObservedDays, s.minRemediationDays)
+		return remediation
+	}
+	contextJSON, _ := json.Marshal(map[string]string{
+		"rule_id":              rollup.RuleID,
+		"severity":             rollup.Severity,
+		"recommendation":       rollup.Latest.Recommendation,
+		"evidence":             rollup.Latest.Evidence,
+		"risk":                 rollup.Latest.Risk,
+		"confidence":           rollup.Latest.Confidence,
+		"expected_cost_effect": rollup.Latest.ExpectedCostEffect,
+		"observed_days":        strconv.Itoa(rollup.ObservedDays),
+		"occurrences":          strconv.Itoa(rollup.Occurrences),
+		"first_seen_at":        rollup.FirstSeenAt.Format(time.RFC3339),
+		"last_seen_at":         rollup.LastSeenAt.Format(time.RFC3339),
+	})
+	clusterID := "default"
+	if target.ClusterID != "" {
+		clusterID = target.ClusterID
+	}
+	remediation.WorkflowInputs = map[string]string{
+		"cluster_id":        clusterID,
+		"namespace":         rollup.Namespace,
+		"workload":          rollup.Workload,
+		"repository":        target.Repository,
+		"instructions_path": target.InstructionsPath,
+		"context_json":      string(contextJSON),
+	}
+	remediation.Available = true
+	remediation.Reason = "Ready to create coding-agent rewrite instructions through CI/CD."
+	return remediation
+}
+
 func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -502,12 +582,12 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-func (s *server) dispatchRemediation(ctx context.Context, token string, inputs map[string]string) error {
+func (s *server) dispatchWorkflow(ctx context.Context, token, workflow string, inputs map[string]string) error {
 	ownerRepo := strings.Trim(s.githubRepository, "/")
 	if !strings.Contains(ownerRepo, "/") {
 		return fmt.Errorf("github repository must be owner/name")
 	}
-	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/actions/workflows/%s/dispatches", ownerRepo, url.PathEscape(s.githubWorkflow))
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/actions/workflows/%s/dispatches", ownerRepo, url.PathEscape(workflow))
 	body, err := json.Marshal(map[string]any{
 		"ref":    s.githubRef,
 		"inputs": inputs,
@@ -573,7 +653,7 @@ func loadRemediationTargets(path string) (map[string]remediationTarget, error) {
 	}
 	targets := map[string]remediationTarget{}
 	for _, target := range file.Targets {
-		if target.Namespace == "" || target.Workload == "" || target.Repository == "" || target.ManifestPath == "" {
+		if target.Namespace == "" || target.Workload == "" || target.Repository == "" {
 			continue
 		}
 		targets[targetKey(target.ClusterID, target.Namespace, target.Workload)] = target
