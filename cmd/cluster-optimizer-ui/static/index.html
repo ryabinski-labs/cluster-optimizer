@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cluster Optimizer Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <rect width="32" height="32" rx="6" />
+            <path d="M8 21h16M8 16h11M8 11h7" />
+          </svg>
+          <h1>Cluster Optimizer</h1>
+        </div>
+        <section class="controls" aria-label="Report controls">
+          <label>
+            <span>Cluster</span>
+            <input id="clusterId" value="default" autocomplete="off" />
+          </label>
+          <label>
+            <span>Limit</span>
+            <input id="limit" type="number" min="1" max="100" value="25" />
+          </label>
+          <div class="segmented" role="group" aria-label="Severity filter">
+            <button class="segment active" type="button" data-severity="all">All</button>
+            <button class="segment" type="button" data-severity="high">High</button>
+            <button class="segment" type="button" data-severity="medium">Medium</button>
+            <button class="segment" type="button" data-severity="low">Low</button>
+          </div>
+          <button id="refresh" class="icon-button" type="button" aria-label="Refresh reports" title="Refresh">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 12a9 9 0 0 1-15.5 6.2M3 12A9 9 0 0 1 18.5 5.8M18 2v5h-5M6 22v-5h5" />
+            </svg>
+          </button>
+        </section>
+      </header>
+
+      <section class="meta-strip" aria-live="polite">
+        <span><b id="tableName">-</b><em>table</em></span>
+        <span><b id="region">-</b><em>region</em></span>
+        <span><b id="generatedAt">never</b><em>latest report</em></span>
+        <span><b id="reportCount">0</b><em>reports</em></span>
+      </section>
+
+      <main class="workspace">
+        <section class="scoreboard" aria-label="Cluster summary">
+          <button class="metric" type="button" data-view="all">
+            <span>Findings</span>
+            <strong id="metricFindings">0</strong>
+          </button>
+          <button class="metric red" type="button" data-severity-shortcut="high">
+            <span>High</span>
+            <strong id="metricHigh">0</strong>
+          </button>
+          <button class="metric amber" type="button" data-severity-shortcut="medium">
+            <span>Medium</span>
+            <strong id="metricMedium">0</strong>
+          </button>
+          <button class="metric blue" type="button" data-view="twonode">
+            <span>2 Nodes</span>
+            <strong id="metricTwoNode">-</strong>
+          </button>
+          <div class="metric">
+            <span>Requested Mem</span>
+            <strong id="metricRequestedMem">-</strong>
+          </div>
+          <div class="metric">
+            <span>Observed Mem</span>
+            <strong id="metricObservedMem">-</strong>
+          </div>
+        </section>
+
+        <section id="errorPanel" class="error-panel hidden" role="alert"></section>
+        <section id="emptyPanel" class="empty-panel hidden">
+          <h2>No reports found</h2>
+          <p>The UI is connected, but DynamoDB does not have reports for this cluster yet.</p>
+        </section>
+
+        <section class="content-grid">
+          <aside class="timeline" aria-label="Report history">
+            <header>
+              <h2>History</h2>
+            </header>
+            <div id="timelineList" class="timeline-list"></div>
+          </aside>
+
+          <section class="findings-panel" aria-label="Recommendations">
+            <header class="panel-head">
+              <div>
+                <p id="viewKicker">Latest Report</p>
+                <h2 id="viewTitle">Recommendations</h2>
+              </div>
+              <label class="filter">
+                <span>Filter</span>
+                <input id="filter" placeholder="workload, rule, risk" autocomplete="off" />
+              </label>
+            </header>
+            <div id="findingsList" class="findings-list"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

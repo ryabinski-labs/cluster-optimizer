@@ -50,6 +50,15 @@ Run locally against your active kubeconfig:
 go run ./cmd/cluster-optimizer --output text
 ```
 
+Run the local DynamoDB-backed UI:
+
+```bash
+go run ./cmd/cluster-optimizer-ui --table cluster-optimizer-reports --region us-east-1
+```
+
+Then open `http://127.0.0.1:8088`. The UI uses the default AWS credential
+chain, so `AWS_PROFILE=default` or your normal default profile works.
+
 Build and publish the image:
 
 ```bash

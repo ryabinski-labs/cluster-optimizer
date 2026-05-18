@@ -23,6 +23,7 @@ jobs:
     runs-on: self-hosted
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_PROFILE: ${{ vars.AWS_PROFILE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -33,6 +34,9 @@ jobs:
             echo "AWS_REGION repository variable is required."
             exit 1
           }
+          if [ -n "${AWS_PROFILE}" ]; then
+            echo "Using AWS_PROFILE=${AWS_PROFILE}"
+          fi
           aws sts get-caller-identity
 
       - name: Deploy DynamoDB table
