@@ -36,6 +36,10 @@ func Analyze(snapshot model.Snapshot) Report {
 	findings := append([]Finding{}, analyzePDBs(snapshot.Workloads, snapshot.PDBs)...)
 	findings = append(findings, analyzeHPAs(snapshot.Workloads, snapshot.HPAs)...)
 	findings = append(findings, analyzeUsage(snapshot.Workloads)...)
+	findings = append(findings, analyzeScaling(snapshot.Workloads, snapshot.HPAs)...)
+	findings = append(findings, analyzeRuntimeModernization(snapshot.Workloads)...)
+	findings = append(findings, analyzeDaemonSetOverhead(snapshot)...)
+	findings = append(findings, analyzeClusterHygiene(snapshot.Pods)...)
 	sort.SliceStable(findings, func(i, j int) bool {
 		return findingRank(findings[i]) < findingRank(findings[j])
 	})
@@ -171,11 +175,13 @@ func analyzeUsage(workloads []model.Workload) []Finding {
 
 func analyzePDBs(workloads []model.Workload, pdbs []model.PDB) []Finding {
 	var findings []Finding
+	matchedPDB := map[string]bool{}
 	for _, pdb := range pdbs {
 		for _, workload := range workloads {
 			if pdb.Namespace != workload.Namespace || !selectorMatches(pdb.Selector, workload.Labels) {
 				continue
 			}
+			matchedPDB[workloadKey(workload)] = true
 			minAvailable := availabilityCount(pdb.MinAvailable, workload.Replicas)
 			maxUnavailable := availabilityCount(pdb.MaxUnavailable, workload.Replicas)
 			if workload.Replicas <= 1 && minAvailable != nil && *minAvailable >= 1 {
@@ -200,6 +206,16 @@ func analyzePDBs(workloads []model.Workload, pdbs []model.PDB) []Finding {
 					"Low: stricter PDB can slow drains but protects service availability.", "high"))
 			}
 		}
+	}
+	for _, workload := range workloads {
+		if workload.Kind == "DaemonSet" || workload.Replicas < 2 || matchedPDB[workloadKey(workload)] {
+			continue
+		}
+		findings = append(findings, finding("missing-pdb-for-multi-replica-workload", "medium", workload,
+			fmt.Sprintf("%s has %d ready replicas and no matching PDB.", workload.Name, workload.Replicas),
+			"Add a PDB such as maxUnavailable: 1 so maintenance and consolidation preserve at least one healthy replica.",
+			"Supports safe drains and autoscaler consolidation without full voluntary disruption.",
+			"Low/medium: stricter disruption policy can slow drains if replicas are unhealthy.", "medium"))
 	}
 	return findings
 }
@@ -227,6 +243,123 @@ func analyzeHPAs(workloads []model.Workload, hpas []model.HPA) []Finding {
 				"Set CPU requests or use a metric that reflects the workload bottleneck.",
 				"Makes autoscaling behavior predictable and avoids hidden capacity risk.",
 				"Medium: changing requests affects HPA utilization math.", "high"))
+		}
+	}
+	return findings
+}
+
+func analyzeScaling(workloads []model.Workload, hpas []model.HPA) []Finding {
+	hpaTargets := map[string]bool{}
+	for _, hpa := range hpas {
+		hpaTargets[hpa.Namespace+"/"+hpa.TargetKind+"/"+hpa.TargetName] = true
+	}
+	var findings []Finding
+	for _, workload := range workloads {
+		if workload.Kind == "DaemonSet" || workload.Replicas < 2 || systemNamespace(workload.Namespace) || hpaTargets[workloadKey(workload)] {
+			continue
+		}
+		findings = append(findings, finding("fixed-replica-capacity-without-autoscaler", "medium", workload,
+			fmt.Sprintf("%s has %d ready replicas and no HPA.", workload.Name, workload.Replicas),
+			"Validate whether demand is steady; otherwise add HPA/KEDA or lower the minimum replica count after SLO review.",
+			"Can reduce idle replicas or make capacity elastic during quiet periods.",
+			"Medium: lowering replica floors can affect availability, cold starts, and burst handling.", "low"))
+	}
+	return findings
+}
+
+func analyzeRuntimeModernization(workloads []model.Workload) []Finding {
+	var findings []Finding
+	for _, workload := range workloads {
+		if workload.Kind == "DaemonSet" || workload.Replicas == 0 || systemNamespace(workload.Namespace) {
+			continue
+		}
+		perReplicaRequestMem := workload.RequestsMemoryMiB / int64(workload.Replicas)
+		perReplicaUsageMem := int64(0)
+		if workload.UsageMemoryMiB != nil {
+			perReplicaUsageMem = *workload.UsageMemoryMiB / int64(workload.Replicas)
+		}
+		if len(workload.RuntimeHints) == 0 {
+			if perReplicaRequestMem < 384 && perReplicaUsageMem < 256 {
+				continue
+			}
+			findings = append(findings, finding("runtime-modernization-candidate", "low", workload,
+				fmt.Sprintf("Runtime was not detected; per-replica request is %s and observed memory is %s.", quantity.FormatMiB(perReplicaRequestMem), quantity.FormatMiB(perReplicaUsageMem)),
+				"Identify the implementation runtime and profile memory-heavy always-on paths; if they are interpreted or framework-heavy, evaluate a Go or Rust rewrite for the hot path before making it a cost project.",
+				"Can reduce per-pod memory footprint and unlock bin-packing when request tuning alone is not enough.",
+				"High: rewrites are product work; require profiling, load testing, canary rollout, and rollback to the existing implementation.", "low"))
+			continue
+		}
+		if contains(workload.RuntimeHints, "go") || contains(workload.RuntimeHints, "rust") || !runtimeRewriteCandidate(workload.RuntimeHints, perReplicaRequestMem, perReplicaUsageMem) {
+			continue
+		}
+		target := "Go or Rust"
+		if contains(workload.RuntimeHints, "browser/chromium") {
+			target = "an on-demand browser worker model, pool right-sizing, or a smaller specialized service"
+		}
+		findings = append(findings, finding("runtime-modernization-candidate", "low", workload,
+			fmt.Sprintf("Detected runtime hints %v with per-replica request %s and observed memory %s.", workload.RuntimeHints, quantity.FormatMiB(perReplicaRequestMem), quantity.FormatMiB(perReplicaUsageMem)),
+			fmt.Sprintf("Profile the workload and evaluate moving memory-heavy always-on paths to %s before treating a rewrite as a cost project.", target),
+			"Can reduce per-pod memory footprint and unlock bin-packing when request tuning alone is not enough.",
+			"High: rewrites are product work; require profiling, load testing, canary rollout, and rollback to the existing implementation.", "low"))
+	}
+	return findings
+}
+
+func analyzeDaemonSetOverhead(snapshot model.Snapshot) []Finding {
+	nodeCount := int64(len(snapshot.Nodes))
+	if nodeCount == 0 {
+		return nil
+	}
+	var allocCPU, allocMem, dsCPU, dsMem int64
+	for _, node := range snapshot.Nodes {
+		allocCPU += node.AllocatableCPUm
+		allocMem += node.AllocatableMemoryMiB
+	}
+	for _, pod := range snapshot.Pods {
+		if pod.Phase == "Succeeded" || pod.Phase == "Failed" || pod.OwnerKind != "DaemonSet" {
+			continue
+		}
+		dsCPU += pod.RequestsCPUm
+		dsMem += pod.RequestsMemoryMiB
+	}
+	if allocCPU == 0 || allocMem == 0 {
+		return nil
+	}
+	var findings []Finding
+	if dsMem*100/allocMem >= 15 || dsCPU*100/allocCPU >= 20 {
+		findings = append(findings, Finding{
+			RuleID:             "daemonset-overhead-limits-small-node-efficiency",
+			Severity:           "medium",
+			Evidence:           fmt.Sprintf("DaemonSets request %s CPU and %s memory across %d nodes.", quantity.FormatCPU(dsCPU), quantity.FormatMiB(dsMem), nodeCount),
+			Recommendation:     "Review provider and observability DaemonSet requests before moving to smaller node counts or smaller node shapes.",
+			ExpectedCostEffect: "May improve bin-packing or show that fewer larger nodes are more efficient than many small nodes.",
+			Risk:               "Medium: system DaemonSets affect networking, logging, and node health; prefer provider-supported tuning only.",
+			Confidence:         "medium",
+			Pillars:            pillars(),
+		})
+	}
+	return findings
+}
+
+func analyzeClusterHygiene(pods []model.Pod) []Finding {
+	var findings []Finding
+	for _, pod := range pods {
+		if pod.Phase == "Succeeded" || pod.Phase == "Failed" {
+			continue
+		}
+		if strings.HasPrefix(pod.Name, "cm-acme-http-solver-") || pod.Labels["acme.cert-manager.io/http01-solver"] == "true" {
+			findings = append(findings, Finding{
+				RuleID:             "cert-manager-http01-solver-running",
+				Severity:           "low",
+				Namespace:          pod.Namespace,
+				Workload:           "Pod/" + pod.Name,
+				Evidence:           "Active cert-manager HTTP-01 solver pod found.",
+				Recommendation:     "Verify the matching Challenge completes quickly; investigate stuck solver pods or fragmented certificate maintenance if these persist.",
+				ExpectedCostEffect: "Usually small, but reduces transient scheduling pressure and operational noise.",
+				Risk:               "Low: inspect Certificate, Order, and Challenge state before changing cert-manager resources.",
+				Confidence:         "medium",
+				Pillars:            pillars(),
+			})
 		}
 	}
 	return findings
@@ -289,6 +422,27 @@ func contains(values []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func runtimeRewriteCandidate(hints []string, perReplicaRequestMem, perReplicaUsageMem int64) bool {
+	if contains(hints, "browser/chromium") {
+		return perReplicaRequestMem >= 512 || perReplicaUsageMem >= 384
+	}
+	if contains(hints, "jvm") {
+		return perReplicaRequestMem >= 512 || perReplicaUsageMem >= 384
+	}
+	if contains(hints, "nodejs") || contains(hints, "python") || contains(hints, "ruby") || contains(hints, "php") {
+		return perReplicaRequestMem >= 256 || perReplicaUsageMem >= 192
+	}
+	return false
+}
+
+func systemNamespace(namespace string) bool {
+	return namespace == "kube-system" || namespace == "kube-public" || namespace == "kube-node-lease" || namespace == "ingress-nginx"
+}
+
+func workloadKey(workload model.Workload) string {
+	return workload.Namespace + "/" + workload.Kind + "/" + workload.Name
 }
 
 func findingRank(f Finding) int {

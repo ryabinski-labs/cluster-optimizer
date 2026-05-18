@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -123,11 +124,13 @@ func collectPods(ctx context.Context, clientset *kubernetes.Clientset, usage map
 
 func podModel(pod corev1.Pod, usage resourceUsage) model.Pod {
 	var reqCPU, reqMem, limCPU, limMem int64
+	images := make([]string, 0, len(pod.Spec.Containers))
 	for _, container := range pod.Spec.Containers {
 		reqCPU += cpuMilli(container.Resources.Requests)
 		reqMem += memoryMiB(container.Resources.Requests)
 		limCPU += cpuMilli(container.Resources.Limits)
 		limMem += memoryMiB(container.Resources.Limits)
+		images = append(images, container.Image)
 	}
 	ownerKind, ownerName := firstOwner(pod.OwnerReferences)
 	return model.Pod{
@@ -138,6 +141,7 @@ func podModel(pod corev1.Pod, usage resourceUsage) model.Pod {
 		Labels:            pod.Labels,
 		OwnerKind:         ownerKind,
 		OwnerName:         ownerName,
+		Images:            uniqueStrings(images),
 		RequestsCPUm:      reqCPU,
 		RequestsMemoryMiB: reqMem,
 		LimitsCPUm:        limCPU,
@@ -186,6 +190,8 @@ func workloadModel(kind, namespace, name string, replicas int32, labels, selecto
 		Replicas:          replicas,
 		Labels:            labels,
 		Selector:          selector,
+		Images:            aggregate.images,
+		RuntimeHints:      runtimeHints(aggregate.images, labels),
 		RequestsCPUm:      aggregate.requestsCPU,
 		RequestsMemoryMiB: aggregate.requestsMem,
 		LimitsCPUm:        aggregate.limitsCPU,
@@ -300,6 +306,7 @@ type podAggregate struct {
 	limitsMem   int64
 	usageCPU    *int64
 	usageMem    *int64
+	images      []string
 }
 
 func cpuMilli(resources corev1.ResourceList) int64 {
@@ -341,6 +348,7 @@ func aggregatePods(pods []model.Pod) map[string]podAggregate {
 		aggregate.limitsMem += pod.LimitsMemoryMiB
 		aggregate.usageCPU = addPtr(aggregate.usageCPU, pod.UsageCPUm)
 		aggregate.usageMem = addPtr(aggregate.usageMem, pod.UsageMemoryMiB)
+		aggregate.images = uniqueStrings(append(aggregate.images, pod.Images...))
 		aggregates[k] = aggregate
 	}
 	return aggregates
@@ -407,4 +415,52 @@ func addPtr(current, next *int64) *int64 {
 		value += *current
 	}
 	return &value
+}
+
+func runtimeHints(images []string, labels map[string]string) []string {
+	var hints []string
+	for _, image := range images {
+		hints = appendRuntimeHint(hints, image)
+	}
+	for _, key := range []string{"cluster-optimizer.io/runtime", "app.kubernetes.io/runtime", "runtime", "language"} {
+		hints = appendRuntimeHint(hints, labels[key])
+	}
+	return uniqueStrings(hints)
+}
+
+func appendRuntimeHint(hints []string, value string) []string {
+	normalized := strings.ToLower(value)
+	switch {
+	case strings.Contains(normalized, "browserless") || strings.Contains(normalized, "chrome") || strings.Contains(normalized, "chromium"):
+		return append(hints, "browser/chromium")
+	case strings.Contains(normalized, "node") || strings.Contains(normalized, "nodejs") || strings.Contains(normalized, "nextjs"):
+		return append(hints, "nodejs")
+	case strings.Contains(normalized, "python") || strings.Contains(normalized, "django") || strings.Contains(normalized, "fastapi"):
+		return append(hints, "python")
+	case strings.Contains(normalized, "ruby") || strings.Contains(normalized, "rails"):
+		return append(hints, "ruby")
+	case strings.Contains(normalized, "java") || strings.Contains(normalized, "openjdk") || strings.Contains(normalized, "jre"):
+		return append(hints, "jvm")
+	case strings.Contains(normalized, "php"):
+		return append(hints, "php")
+	case strings.Contains(normalized, "go") || strings.Contains(normalized, "golang"):
+		return append(hints, "go")
+	case strings.Contains(normalized, "rust"):
+		return append(hints, "rust")
+	}
+	return hints
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	var result []string
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }

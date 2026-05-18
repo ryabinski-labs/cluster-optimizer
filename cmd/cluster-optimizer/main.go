@@ -83,7 +83,14 @@ func renderText(report analyzer.Report) string {
 		return out + "- No findings.\n"
 	}
 	for _, finding := range report.Findings {
-		out += fmt.Sprintf("- [%s] %s/%s %s: %s\n", finding.Severity, finding.Namespace, finding.Workload, finding.RuleID, finding.Recommendation)
+		scope := finding.Workload
+		if finding.Namespace != "" && scope != "" {
+			scope = finding.Namespace + "/" + scope
+		}
+		if scope == "" {
+			scope = "cluster"
+		}
+		out += fmt.Sprintf("- [%s] %s %s: %s\n", finding.Severity, scope, finding.RuleID, finding.Recommendation)
 		out += fmt.Sprintf("  Evidence: %s\n  Risk: %s\n", finding.Evidence, finding.Risk)
 	}
 	return out

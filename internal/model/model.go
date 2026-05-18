@@ -17,6 +17,7 @@ type Pod struct {
 	Labels            map[string]string `json:"labels,omitempty"`
 	OwnerKind         string            `json:"owner_kind,omitempty"`
 	OwnerName         string            `json:"owner_name,omitempty"`
+	Images            []string          `json:"images,omitempty"`
 	RequestsCPUm      int64             `json:"requests_cpu_m"`
 	RequestsMemoryMiB int64             `json:"requests_memory_mib"`
 	LimitsCPUm        int64             `json:"limits_cpu_m"`
@@ -32,6 +33,8 @@ type Workload struct {
 	Replicas          int32             `json:"replicas"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Selector          map[string]string `json:"selector,omitempty"`
+	Images            []string          `json:"images,omitempty"`
+	RuntimeHints      []string          `json:"runtime_hints,omitempty"`
 	RequestsCPUm      int64             `json:"requests_cpu_m"`
 	RequestsMemoryMiB int64             `json:"requests_memory_mib"`
 	LimitsCPUm        int64             `json:"limits_cpu_m"`

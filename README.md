@@ -234,11 +234,16 @@ Implemented checks:
 - Cluster allocatable/requested CPU and memory.
 - Workloads using more memory than they request.
 - Workloads that appear materially over-requested.
+- Runtime modernization candidates where profiling a rewrite to Go/Rust, or a
+  more elastic worker model, could reduce always-on memory cost.
+- Fixed replica capacity without HPA/KEDA evidence.
 - Single-replica PDBs that block voluntary drains.
+- Missing PDBs for multi-replica workloads.
 - PDBs that allow all replicas to be disrupted.
 - HPAs where `minReplicas == maxReplicas`.
 - CPU HPAs with missing CPU requests.
 - DaemonSet per-node overhead.
+- cert-manager HTTP-01 solver hygiene.
 - Two-node feasibility estimate for current node shape.
 
 Non-goals for the first release:

@@ -82,3 +82,83 @@ func TestSkipsCPURecommendationWhenCPUMetricsMissing(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectsRuntimeModernizationCandidate(t *testing.T) {
+	mem := int64(460)
+	snapshot := model.Snapshot{
+		ClusterID:  "test",
+		CapturedAt: time.Now(),
+		Nodes: []model.Node{
+			{Name: "n1", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+			{Name: "n2", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+		},
+		Workloads: []model.Workload{{
+			Namespace: "default", Name: "api", Kind: "Deployment", Replicas: 1,
+			Labels: map[string]string{"app": "api"}, Selector: map[string]string{"app": "api"},
+			RuntimeHints: []string{"nodejs"}, RequestsCPUm: 100, RequestsMemoryMiB: 512, UsageMemoryMiB: &mem,
+		}},
+	}
+
+	report := Analyze(snapshot)
+	for _, finding := range report.Findings {
+		if finding.RuleID == "runtime-modernization-candidate" {
+			return
+		}
+	}
+	t.Fatalf("runtime modernization finding missing: %#v", report.Findings)
+}
+
+func TestDetectsUnknownRuntimeModernizationCandidate(t *testing.T) {
+	mem := int64(333)
+	snapshot := model.Snapshot{
+		ClusterID:  "test",
+		CapturedAt: time.Now(),
+		Nodes: []model.Node{
+			{Name: "n1", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+			{Name: "n2", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+		},
+		Workloads: []model.Workload{{
+			Namespace: "default", Name: "api", Kind: "Deployment", Replicas: 1,
+			Labels: map[string]string{"app": "api"}, Selector: map[string]string{"app": "api"},
+			RequestsCPUm: 100, RequestsMemoryMiB: 128, UsageMemoryMiB: &mem,
+		}},
+	}
+
+	report := Analyze(snapshot)
+	for _, finding := range report.Findings {
+		if finding.RuleID == "runtime-modernization-candidate" {
+			return
+		}
+	}
+	t.Fatalf("unknown runtime modernization finding missing: %#v", report.Findings)
+}
+
+func TestDetectsFixedReplicaWithoutAutoscaler(t *testing.T) {
+	snapshot := model.Snapshot{
+		ClusterID:  "test",
+		CapturedAt: time.Now(),
+		Nodes: []model.Node{
+			{Name: "n1", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+			{Name: "n2", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+		},
+		Workloads: []model.Workload{{
+			Namespace: "default", Name: "api", Kind: "Deployment", Replicas: 2,
+			Labels: map[string]string{"app": "api"}, Selector: map[string]string{"app": "api"},
+			RequestsCPUm: 100, RequestsMemoryMiB: 128,
+		}},
+	}
+
+	report := Analyze(snapshot)
+	var sawScaling, sawPDB bool
+	for _, finding := range report.Findings {
+		if finding.RuleID == "fixed-replica-capacity-without-autoscaler" {
+			sawScaling = true
+		}
+		if finding.RuleID == "missing-pdb-for-multi-replica-workload" {
+			sawPDB = true
+		}
+	}
+	if !sawScaling || !sawPDB {
+		t.Fatalf("expected scaling and pdb findings, got: %#v", report.Findings)
+	}
+}
