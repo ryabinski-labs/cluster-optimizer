@@ -20,9 +20,15 @@ go test ./...
 go run ./cmd/cluster-optimizer --output text
 ```
 
+## Changelog
+
+Every pull request must update `CHANGELOG.md` under `## Unreleased` with a
+short user-visible summary of the change.
+
 ## Pull Request Checklist
 
 - [ ] New rules include tests.
+- [ ] CHANGELOG.md updated under `## Unreleased`.
 - [ ] Kubernetes manifests still pass client-side dry-run.
 - [ ] No Secret data is logged or persisted.
 - [ ] User-facing output distinguishes observed facts from assumptions.
