@@ -102,23 +102,23 @@ jobs:
           }
           git commit -m "Tune ${WORKLOAD} from cluster optimizer"
           git push --set-upstream origin "${branch}"
+          {
+            echo "Cluster Optimizer observed a persistent recommendation and generated this api.yml patch."
+            echo
+            echo "- Namespace: ${NAMESPACE}"
+            echo "- Workload: ${WORKLOAD}"
+            echo "- Rule: ${RULE_ID}"
+            echo "- Context:"
+            echo
+            echo '```json'
+            printf '%s\n' "${CONTEXT_JSON}"
+            echo '```'
+            echo
+            echo "Validate rollout metrics before merging: pod restarts, OOMKilled events, latency, CPU throttling, and node bin-packing."
+          } > /tmp/cluster-optimizer-pr-body.md
           gh pr create \
             --repo "${TARGET_REPOSITORY}" \
             --base main \
             --head "${branch}" \
             --title "Tune ${WORKLOAD} from cluster optimizer" \
-            --body "$(cat <<BODY
-Cluster Optimizer observed a persistent recommendation and generated this api.yml patch.
-
-- Namespace: ${NAMESPACE}
-- Workload: ${WORKLOAD}
-- Rule: ${RULE_ID}
-- Context:
-
-\`\`\`json
-${CONTEXT_JSON}
-\`\`\`
-
-Validate rollout metrics before merging: pod restarts, OOMKilled events, latency, CPU throttling, and node bin-packing.
-BODY
-)"
+            --body-file /tmp/cluster-optimizer-pr-body.md
