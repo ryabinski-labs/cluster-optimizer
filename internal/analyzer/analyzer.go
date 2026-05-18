@@ -49,6 +49,7 @@ func Analyze(snapshot model.Snapshot) Report {
 
 func summary(snapshot model.Snapshot) map[string]interface{} {
 	var allocCPU, allocMem, reqCPU, reqMem, usageCPU, usageMem, dsCPU, dsMem int64
+	var sawUsageCPU, sawUsageMem bool
 	activePods := 0
 	instanceTypes := map[string]bool{}
 	for _, node := range snapshot.Nodes {
@@ -67,9 +68,11 @@ func summary(snapshot model.Snapshot) map[string]interface{} {
 		reqMem += pod.RequestsMemoryMiB
 		if pod.UsageCPUm != nil {
 			usageCPU += *pod.UsageCPUm
+			sawUsageCPU = true
 		}
 		if pod.UsageMemoryMiB != nil {
 			usageMem += *pod.UsageMemoryMiB
+			sawUsageMem = true
 		}
 		if pod.OwnerKind == "DaemonSet" {
 			dsCPU += pod.RequestsCPUm
@@ -82,18 +85,18 @@ func summary(snapshot model.Snapshot) map[string]interface{} {
 	}
 	sort.Strings(types)
 	return map[string]interface{}{
-		"node_count":                      len(snapshot.Nodes),
-		"instance_types":                  types,
-		"active_pods":                     activePods,
-		"allocatable_cpu_m":               allocCPU,
-		"allocatable_memory_mib":          allocMem,
-		"requested_cpu_m":                 reqCPU,
-		"requested_memory_mib":            reqMem,
-		"observed_cpu_m":                  zeroToNil(usageCPU),
-		"observed_memory_mib":             zeroToNil(usageMem),
-		"daemonset_requested_cpu_m":       dsCPU,
-		"daemonset_requested_memory_mib":  dsMem,
-		"two_node_estimate":               twoNodeEstimate(snapshot, reqCPU, reqMem, dsCPU, dsMem),
+		"node_count":                     len(snapshot.Nodes),
+		"instance_types":                 types,
+		"active_pods":                    activePods,
+		"allocatable_cpu_m":              allocCPU,
+		"allocatable_memory_mib":         allocMem,
+		"requested_cpu_m":                reqCPU,
+		"requested_memory_mib":           reqMem,
+		"observed_cpu_m":                 optionalMetric(usageCPU, sawUsageCPU),
+		"observed_memory_mib":            optionalMetric(usageMem, sawUsageMem),
+		"daemonset_requested_cpu_m":      dsCPU,
+		"daemonset_requested_memory_mib": dsMem,
+		"two_node_estimate":              twoNodeEstimate(snapshot, reqCPU, reqMem, dsCPU, dsMem),
 	}
 }
 
@@ -120,46 +123,47 @@ func twoNodeEstimate(snapshot model.Snapshot, reqCPU, reqMem, dsCPU, dsMem int64
 	cpuHeadroom := targetCPU - projectedCPU
 	memHeadroom := targetMem - projectedMem
 	return map[string]interface{}{
-		"feasible":                    cpuHeadroom >= minCPUHeadroom && memHeadroom >= minMemHeadroom,
-		"projected_requested_cpu_m":    projectedCPU,
+		"feasible":                       cpuHeadroom >= minCPUHeadroom && memHeadroom >= minMemHeadroom,
+		"projected_requested_cpu_m":      projectedCPU,
 		"projected_requested_memory_mib": projectedMem,
-		"target_allocatable_cpu_m":     targetCPU,
-		"target_allocatable_memory_mib": targetMem,
-		"cpu_headroom_m":              cpuHeadroom,
-		"memory_headroom_mib":          memHeadroom,
-		"minimum_cpu_headroom_m":       minCPUHeadroom,
-		"minimum_memory_headroom_mib":  minMemHeadroom,
+		"target_allocatable_cpu_m":       targetCPU,
+		"target_allocatable_memory_mib":  targetMem,
+		"cpu_headroom_m":                 cpuHeadroom,
+		"memory_headroom_mib":            memHeadroom,
+		"minimum_cpu_headroom_m":         minCPUHeadroom,
+		"minimum_memory_headroom_mib":    minMemHeadroom,
 	}
 }
 
 func analyzeUsage(workloads []model.Workload) []Finding {
 	var findings []Finding
 	for _, workload := range workloads {
-		if workload.UsageMemoryMiB == nil {
-			continue
+		if workload.UsageMemoryMiB != nil {
+			usageMem := *workload.UsageMemoryMiB
+			if workload.RequestsMemoryMiB > 0 && usageMem > workload.RequestsMemoryMiB*12/10 && usageMem-workload.RequestsMemoryMiB > 64 {
+				findings = append(findings, finding("memory-request-below-usage", "high", workload,
+					fmt.Sprintf("Observed memory %s exceeds request %s.", quantity.FormatMiB(usageMem), quantity.FormatMiB(workload.RequestsMemoryMiB)),
+					"Raise memory request to at least observed p95 plus headroom before consolidation.",
+					"Prevents false bin-packing that causes evictions; may increase requested capacity.",
+					"Medium: request increases can delay node reduction but improve reliability.", "medium"))
+			}
+			if workload.RequestsMemoryMiB > 0 && usageMem < workload.RequestsMemoryMiB/2 && workload.RequestsMemoryMiB-usageMem > 128 {
+				findings = append(findings, finding("memory-request-over-provisioned", "medium", workload,
+					fmt.Sprintf("Observed memory %s is less than half of request %s.", quantity.FormatMiB(usageMem), quantity.FormatMiB(workload.RequestsMemoryMiB)),
+					"Review multi-day p95/p99 memory and lower request only if peaks support it.",
+					"May unlock bin-packing and node scale-down.",
+					"Medium: memory reductions need peak and OOM evidence.", "low"))
+			}
 		}
-		usageMem := *workload.UsageMemoryMiB
-		usageCPU := deref(workload.UsageCPUm)
-		if workload.RequestsMemoryMiB > 0 && usageMem > workload.RequestsMemoryMiB*12/10 && usageMem-workload.RequestsMemoryMiB > 64 {
-			findings = append(findings, finding("memory-request-below-usage", "high", workload,
-				fmt.Sprintf("Observed memory %s exceeds request %s.", quantity.FormatMiB(usageMem), quantity.FormatMiB(workload.RequestsMemoryMiB)),
-				"Raise memory request to at least observed p95 plus headroom before consolidation.",
-				"Prevents false bin-packing that causes evictions; may increase requested capacity.",
-				"Medium: request increases can delay node reduction but improve reliability.", "medium"))
-		}
-		if workload.RequestsMemoryMiB > 0 && usageMem < workload.RequestsMemoryMiB/2 && workload.RequestsMemoryMiB-usageMem > 128 {
-			findings = append(findings, finding("memory-request-over-provisioned", "medium", workload,
-				fmt.Sprintf("Observed memory %s is less than half of request %s.", quantity.FormatMiB(usageMem), quantity.FormatMiB(workload.RequestsMemoryMiB)),
-				"Review multi-day p95/p99 memory and lower request only if peaks support it.",
-				"May unlock bin-packing and node scale-down.",
-				"Medium: memory reductions need peak and OOM evidence.", "low"))
-		}
-		if workload.RequestsCPUm > 0 && usageCPU < workload.RequestsCPUm/5 && workload.RequestsCPUm-usageCPU > 100 {
-			findings = append(findings, finding("cpu-request-over-provisioned", "medium", workload,
-				fmt.Sprintf("Observed CPU %s is materially below request %s.", quantity.FormatCPU(usageCPU), quantity.FormatCPU(workload.RequestsCPUm)),
-				"Lower CPU request after checking latency and throttling metrics.",
-				"Improves schedulable CPU headroom and HPA sensitivity.",
-				"Low/medium: CPU is compressible, but latency-sensitive paths need throttling checks.", "medium"))
+		if workload.UsageCPUm != nil {
+			usageCPU := *workload.UsageCPUm
+			if usageCPU > 0 && workload.RequestsCPUm > 0 && usageCPU < workload.RequestsCPUm/5 && workload.RequestsCPUm-usageCPU > 100 {
+				findings = append(findings, finding("cpu-request-over-provisioned", "medium", workload,
+					fmt.Sprintf("Observed CPU %s is materially below request %s.", quantity.FormatCPU(usageCPU), quantity.FormatCPU(workload.RequestsCPUm)),
+					"Lower CPU request after checking latency and throttling metrics.",
+					"Improves schedulable CPU headroom and HPA sensitivity.",
+					"Low/medium: CPU is compressible, but latency-sensitive paths need throttling checks.", "low"))
+			}
 		}
 	}
 	return findings
@@ -210,10 +214,10 @@ func analyzeHPAs(workloads []model.Workload, hpas []model.HPA) []Finding {
 		if hpa.MinReplicas == hpa.MaxReplicas {
 			findings = append(findings, Finding{
 				RuleID: "hpa-min-equals-max", Severity: "low", Namespace: hpa.Namespace, Workload: "HPA/" + hpa.Name,
-				Evidence: fmt.Sprintf("HPA %s has minReplicas=maxReplicas=%d.", hpa.Name, hpa.MinReplicas),
-				Recommendation: "Remove the HPA or widen the replica range so it can influence capacity.",
+				Evidence:           fmt.Sprintf("HPA %s has minReplicas=maxReplicas=%d.", hpa.Name, hpa.MinReplicas),
+				Recommendation:     "Remove the HPA or widen the replica range so it can influence capacity.",
 				ExpectedCostEffect: "Reduces control-plane noise; no direct node saving unless range changes.",
-				Risk: "Low.", Confidence: "high", Pillars: pillars(),
+				Risk:               "Low.", Confidence: "high", Pillars: pillars(),
 			})
 		}
 		workload := byKey[hpa.Namespace+"/"+hpa.TargetKind+"/"+hpa.TargetName]
@@ -238,11 +242,11 @@ func finding(ruleID, severity string, workload model.Workload, evidence, recomme
 func pillars() map[string]string {
 	return map[string]string{
 		"operational_excellence": "Recommendation includes validation context and avoids hidden automation.",
-		"security": "No mutation or secret value access required.",
-		"reliability": "Avoids changes that hide real capacity needs or block safe drains.",
+		"security":               "No mutation or secret value access required.",
+		"reliability":            "Avoids changes that hide real capacity needs or block safe drains.",
 		"performance_efficiency": "Uses requests and observed usage to improve scheduling fit.",
-		"cost_optimization": "Targets wasted requests, blocked consolidation, and scale inefficiency.",
-		"sustainability": "Reduces idle compute where reliability evidence supports it.",
+		"cost_optimization":      "Targets wasted requests, blocked consolidation, and scale inefficiency.",
+		"sustainability":         "Reduces idle compute where reliability evidence supports it.",
 	}
 }
 
@@ -292,18 +296,11 @@ func findingRank(f Finding) int {
 	return rank[f.Severity]
 }
 
-func zeroToNil(value int64) interface{} {
-	if value == 0 {
+func optionalMetric(value int64, present bool) interface{} {
+	if !present {
 		return nil
 	}
 	return value
-}
-
-func deref(value *int64) int64 {
-	if value == nil {
-		return 0
-	}
-	return *value
 }
 
 func max(a, b int64) int64 {
@@ -312,4 +309,3 @@ func max(a, b int64) int64 {
 	}
 	return b
 }
-

@@ -4,10 +4,12 @@ import "testing"
 
 func TestCPUToMillicores(t *testing.T) {
 	cases := map[string]int64{
-		"250m": 250,
-		"1":    1000,
-		"0.5":  500,
-		"":     0,
+		"250m":     250,
+		"250000u":  250,
+		"2500000n": 3,
+		"1":        1000,
+		"0.5":      500,
+		"":         0,
 	}
 	for input, want := range cases {
 		got, err := CPUToMillicores(input)
@@ -22,10 +24,10 @@ func TestCPUToMillicores(t *testing.T) {
 
 func TestMemoryToMiB(t *testing.T) {
 	cases := map[string]int64{
-		"512Mi":  512,
-		"1Gi":    1024,
+		"512Mi":   512,
+		"1Gi":     1024,
 		"1048576": 1,
-		"":       0,
+		"":        0,
 	}
 	for input, want := range cases {
 		got, err := MemoryToMiB(input)
@@ -37,4 +39,3 @@ func TestMemoryToMiB(t *testing.T) {
 		}
 	}
 }
-

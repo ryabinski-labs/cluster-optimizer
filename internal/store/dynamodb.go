@@ -15,8 +15,8 @@ import (
 )
 
 type DynamoDBWriter struct {
-	table string
-	client *dynamodb.Client
+	table   string
+	client  *dynamodb.Client
 	ttlDays int
 }
 
@@ -43,14 +43,13 @@ func (w *DynamoDBWriter) PutReport(ctx context.Context, report analyzer.Report) 
 	_, err = w.client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(w.table),
 		Item: map[string]types.AttributeValue{
-			"pk":          &types.AttributeValueMemberS{Value: "CLUSTER#" + report.ClusterID},
-			"sk":          &types.AttributeValueMemberS{Value: "REPORT#" + report.GeneratedAt.Format(time.RFC3339)},
-			"cluster_id":  &types.AttributeValueMemberS{Value: report.ClusterID},
+			"pk":           &types.AttributeValueMemberS{Value: "CLUSTER#" + report.ClusterID},
+			"sk":           &types.AttributeValueMemberS{Value: "REPORT#" + report.GeneratedAt.Format(time.RFC3339)},
+			"cluster_id":   &types.AttributeValueMemberS{Value: report.ClusterID},
 			"generated_at": &types.AttributeValueMemberS{Value: report.GeneratedAt.Format(time.RFC3339)},
-			"expires_at":  &types.AttributeValueMemberN{Value: strconv.FormatInt(expiresAt, 10)},
-			"report_json": &types.AttributeValueMemberS{Value: string(payload)},
+			"expires_at":   &types.AttributeValueMemberN{Value: strconv.FormatInt(expiresAt, 10)},
+			"report_json":  &types.AttributeValueMemberS{Value: string(payload)},
 		},
 	})
 	return err
 }
-

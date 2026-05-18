@@ -88,4 +88,3 @@ func renderText(report analyzer.Report) string {
 	}
 	return out
 }
-

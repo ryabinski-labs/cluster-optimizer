@@ -59,3 +59,26 @@ func TestDetectsMemoryRequestBelowUsage(t *testing.T) {
 	t.Fatalf("memory finding missing: %#v", report.Findings)
 }
 
+func TestSkipsCPURecommendationWhenCPUMetricsMissing(t *testing.T) {
+	mem := int64(128)
+	snapshot := model.Snapshot{
+		ClusterID:  "test",
+		CapturedAt: time.Now(),
+		Nodes: []model.Node{
+			{Name: "n1", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+			{Name: "n2", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+		},
+		Workloads: []model.Workload{{
+			Namespace: "default", Name: "api", Kind: "Deployment", Replicas: 1,
+			Labels: map[string]string{"app": "api"}, Selector: map[string]string{"app": "api"},
+			RequestsCPUm: 500, RequestsMemoryMiB: 128, UsageMemoryMiB: &mem,
+		}},
+	}
+
+	report := Analyze(snapshot)
+	for _, finding := range report.Findings {
+		if finding.RuleID == "cpu-request-over-provisioned" {
+			t.Fatalf("unexpected cpu finding: %#v", finding)
+		}
+	}
+}

@@ -2,6 +2,7 @@ package quantity
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -11,14 +12,28 @@ func CPUToMillicores(raw string) (int64, error) {
 	if raw == "" {
 		return 0, nil
 	}
-	if strings.HasSuffix(raw, "m") {
-		return strconv.ParseInt(strings.TrimSuffix(raw, "m"), 10, 64)
+	units := []struct {
+		suffix string
+		scale  float64
+	}{
+		{"n", 1.0 / 1000.0 / 1000.0},
+		{"u", 1.0 / 1000.0},
+		{"m", 1},
+	}
+	for _, unit := range units {
+		if strings.HasSuffix(raw, unit.suffix) {
+			value, err := strconv.ParseFloat(strings.TrimSuffix(raw, unit.suffix), 64)
+			if err != nil {
+				return 0, fmt.Errorf("parse cpu quantity %q: %w", raw, err)
+			}
+			return milliCPU(value * unit.scale), nil
+		}
 	}
 	value, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
 		return 0, fmt.Errorf("parse cpu quantity %q: %w", raw, err)
 	}
-	return int64(value * 1000), nil
+	return milliCPU(value * 1000), nil
 }
 
 func MemoryToMiB(raw string) (int64, error) {
@@ -62,3 +77,9 @@ func FormatMiB(mib int64) string {
 	return fmt.Sprintf("%dMi", mib)
 }
 
+func milliCPU(value float64) int64 {
+	if value > 0 && value < 1 {
+		return 1
+	}
+	return int64(math.Round(value))
+}

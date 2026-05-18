@@ -3,10 +3,10 @@ package model
 import "time"
 
 type Node struct {
-	Name                  string `json:"name"`
-	InstanceType          string `json:"instance_type,omitempty"`
-	AllocatableCPUm       int64  `json:"allocatable_cpu_m"`
-	AllocatableMemoryMiB  int64  `json:"allocatable_memory_mib"`
+	Name                 string `json:"name"`
+	InstanceType         string `json:"instance_type,omitempty"`
+	AllocatableCPUm      int64  `json:"allocatable_cpu_m"`
+	AllocatableMemoryMiB int64  `json:"allocatable_memory_mib"`
 }
 
 type Pod struct {
@@ -67,4 +67,3 @@ type Snapshot struct {
 	PDBs       []PDB      `json:"pdbs"`
 	HPAs       []HPA      `json:"hpas"`
 }
-
