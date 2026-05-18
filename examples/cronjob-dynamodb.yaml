@@ -30,10 +30,23 @@ spec:
               env:
                 - name: CLUSTER_OPTIMIZER_CLUSTER_ID
                   value: "default"
-                # Set this to enable DynamoDB persistence. Leave unset for
-                # stdout-only reports collected by Kubernetes job logs.
-                # - name: DYNAMODB_TABLE
-                #   value: cluster-optimizer-reports
+                - name: DYNAMODB_TABLE
+                  value: cluster-optimizer-reports
+                - name: AWS_REGION
+                  valueFrom:
+                    secretKeyRef:
+                      name: cluster-optimizer-aws
+                      key: AWS_REGION
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: cluster-optimizer-aws
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: cluster-optimizer-aws
+                      key: AWS_SECRET_ACCESS_KEY
               resources:
                 requests:
                   cpu: 20m

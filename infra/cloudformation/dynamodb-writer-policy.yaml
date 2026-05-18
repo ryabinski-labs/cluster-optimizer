@@ -1,0 +1,27 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Least-privilege IAM managed policy for Cluster Optimizer DynamoDB writes.
+Parameters:
+  TableName:
+    Type: String
+    Description: DynamoDB table name used for Cluster Optimizer report history.
+  PolicyName:
+    Type: String
+    Default: cluster-optimizer-dynamodb-writer
+Resources:
+  ClusterOptimizerDynamoDBWriterPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Ref PolicyName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: WriteClusterOptimizerReports
+            Effect: Allow
+            Action:
+              - dynamodb:DescribeTable
+              - dynamodb:PutItem
+              - dynamodb:Query
+            Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
+Outputs:
+  ManagedPolicyArn:
+    Value: !Ref ClusterOptimizerDynamoDBWriterPolicy

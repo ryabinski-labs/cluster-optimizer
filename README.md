@@ -50,16 +50,90 @@ Run locally against your active kubeconfig:
 go run ./cmd/cluster-optimizer --output text
 ```
 
-Run in-cluster with DynamoDB persistence:
+Build and publish the image:
+
+```bash
+docker build -t ghcr.io/gipsychef/cluster-optimizer:0.1.0 .
+docker push ghcr.io/gipsychef/cluster-optimizer:0.1.0
+```
+
+Run in-cluster without persistence:
 
 ```bash
 kubectl apply -f manifests/rbac.yaml
 kubectl apply -f manifests/cronjob.yaml
 ```
 
-Set `DYNAMODB_TABLE` on the CronJob to enable persistence. Without it, the
-optimizer writes the report to stdout only.
-The example DynamoDB table lives at `infra/cloudformation/dynamodb-table.yaml`.
+This mode writes each report to the Kubernetes job logs. It is useful for
+ad-hoc checks, but it cannot calculate multi-day history.
+
+Trigger a one-off run:
+
+```bash
+kubectl create job -n cluster-optimizer --from=cronjob/cluster-optimizer cluster-optimizer-manual
+kubectl logs -n cluster-optimizer job/cluster-optimizer-manual
+```
+
+## DynamoDB Persistence
+
+DynamoDB is optional for a single report and recommended for continuous cost
+optimization. Historical data is what lets the optimizer distinguish idle
+capacity from short-lived quiet periods before recommending lower requests.
+
+Create the table:
+
+```bash
+aws cloudformation deploy \
+  --stack-name cluster-optimizer-dynamodb \
+  --template-file infra/cloudformation/dynamodb-table.yaml \
+  --parameter-overrides TableName=cluster-optimizer-reports
+```
+
+Create the least-privilege DynamoDB writer policy:
+
+```bash
+aws cloudformation deploy \
+  --stack-name cluster-optimizer-dynamodb-writer-policy \
+  --template-file infra/cloudformation/dynamodb-writer-policy.yaml \
+  --parameter-overrides TableName=cluster-optimizer-reports \
+  --capabilities CAPABILITY_NAMED_IAM
+```
+
+For a non-AWS Kubernetes cluster such as DOKS, attach that managed policy to an
+IAM principal and provide its access key as a Kubernetes Secret:
+
+```bash
+aws iam create-user --user-name cluster-optimizer-doks
+aws iam attach-user-policy \
+  --user-name cluster-optimizer-doks \
+  --policy-arn <managed-policy-arn>
+aws iam create-access-key --user-name cluster-optimizer-doks
+```
+
+Create the Kubernetes namespace, ServiceAccount, and read-only RBAC:
+
+```bash
+kubectl apply -f manifests/rbac.yaml
+```
+
+Create the Kubernetes Secret from the access key values returned by AWS:
+
+```bash
+kubectl create secret generic cluster-optimizer-aws \
+  -n cluster-optimizer \
+  --from-literal=AWS_ACCESS_KEY_ID=<access-key-id> \
+  --from-literal=AWS_SECRET_ACCESS_KEY=<secret-access-key> \
+  --from-literal=AWS_REGION=<aws-region>
+```
+
+Deploy the DynamoDB-enabled CronJob:
+
+```bash
+kubectl apply -f examples/cronjob-dynamodb.yaml
+```
+
+Without `DYNAMODB_TABLE`, the optimizer writes the report to stdout only.
+With `DYNAMODB_TABLE`, it writes the same report to DynamoDB after printing it.
 
 ## DynamoDB Model
 
