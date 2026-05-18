@@ -53,7 +53,7 @@ go run ./cmd/cluster-optimizer --output text
 Run the local DynamoDB-backed UI:
 
 ```bash
-go run ./cmd/cluster-optimizer-ui --table cluster-optimizer-reports --region us-east-1
+./scripts/start-ui.sh
 ```
 
 Then open `http://127.0.0.1:8088`. The UI uses the default AWS credential
