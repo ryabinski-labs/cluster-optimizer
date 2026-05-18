@@ -463,20 +463,23 @@ func (s *server) remediationFor(rollup recommendationRollup) remediationSummary 
 	}
 	remediation.TargetCPU = targetCPU
 	remediation.TargetMemory = targetMemory
-	inputs := map[string]string{
-		"cluster_id":     "default",
-		"rule_id":        rollup.RuleID,
-		"namespace":      rollup.Namespace,
-		"workload":       rollup.Workload,
-		"repository":     target.Repository,
-		"manifest_path":  target.ManifestPath,
-		"container":      target.Container,
+	contextJSON, _ := json.Marshal(map[string]string{
 		"recommendation": rollup.Latest.Recommendation,
 		"evidence":       rollup.Latest.Evidence,
 		"observed_days":  strconv.Itoa(rollup.ObservedDays),
 		"occurrences":    strconv.Itoa(rollup.Occurrences),
-		"target_cpu":     targetCPU,
-		"target_memory":  targetMemory,
+	})
+	inputs := map[string]string{
+		"cluster_id":    "default",
+		"rule_id":       rollup.RuleID,
+		"namespace":     rollup.Namespace,
+		"workload":      rollup.Workload,
+		"repository":    target.Repository,
+		"manifest_path": target.ManifestPath,
+		"container":     target.Container,
+		"target_cpu":    targetCPU,
+		"target_memory": targetMemory,
+		"context_json":  string(contextJSON),
 	}
 	if target.ClusterID != "" {
 		inputs["cluster_id"] = target.ClusterID

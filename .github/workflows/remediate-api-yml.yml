@@ -39,20 +39,8 @@ on:
         description: Optional target memory request.
         required: false
         type: string
-      observed_days:
-        description: Number of days the finding has persisted.
-        required: true
-        type: string
-      occurrences:
-        description: Number of reports containing the finding.
-        required: true
-        type: string
-      evidence:
-        description: Recommendation evidence.
-        required: true
-        type: string
-      recommendation:
-        description: Recommendation text.
+      context_json:
+        description: JSON context with recommendation, evidence, observed_days, and occurrences.
         required: true
         type: string
 
@@ -101,10 +89,7 @@ jobs:
           RULE_ID: ${{ inputs.rule_id }}
           WORKLOAD: ${{ inputs.workload }}
           NAMESPACE: ${{ inputs.namespace }}
-          OBSERVED_DAYS: ${{ inputs.observed_days }}
-          OCCURRENCES: ${{ inputs.occurrences }}
-          EVIDENCE: ${{ inputs.evidence }}
-          RECOMMENDATION: ${{ inputs.recommendation }}
+          CONTEXT_JSON: ${{ inputs.context_json }}
         run: |
           branch="cluster-optimizer/${RULE_ID}-${GITHUB_RUN_ID}"
           git config user.name "cluster-optimizer"
@@ -128,9 +113,11 @@ Cluster Optimizer observed a persistent recommendation and generated this api.ym
 - Namespace: ${NAMESPACE}
 - Workload: ${WORKLOAD}
 - Rule: ${RULE_ID}
-- Observed window: ${OBSERVED_DAYS} day(s), ${OCCURRENCES} report occurrence(s)
-- Evidence: ${EVIDENCE}
-- Recommendation: ${RECOMMENDATION}
+- Context:
+
+\`\`\`json
+${CONTEXT_JSON}
+\`\`\`
 
 Validate rollout metrics before merging: pod restarts, OOMKilled events, latency, CPU throttling, and node bin-packing.
 BODY
