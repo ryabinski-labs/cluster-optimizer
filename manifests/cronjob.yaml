@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cluster-optimizer
+  namespace: cluster-optimizer
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: cluster-optimizer
+        spec:
+          serviceAccountName: cluster-optimizer
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: optimizer
+              image: ghcr.io/example/cluster-optimizer:0.1.0
+              imagePullPolicy: IfNotPresent
+              args: ["--output", "json"]
+              env:
+                - name: CLUSTER_OPTIMIZER_CLUSTER_ID
+                  value: "default"
+                # Set this to enable DynamoDB persistence. Leave unset for
+                # stdout-only reports collected by Kubernetes job logs.
+                # - name: DYNAMODB_TABLE
+                #   value: cluster-optimizer-reports
+              resources:
+                requests:
+                  cpu: 20m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
