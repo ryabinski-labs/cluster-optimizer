@@ -169,6 +169,9 @@ Repository variables:
 
 Repository secrets:
 
+- `MX1_AWS_ACCESS_KEY_ID`: deployment access key for
+  `mx1-github-actions-runner`.
+- `MX1_AWS_SECRET_ACCESS_KEY`: matching deployment secret key.
 - `DOKS_KUBECONFIG_B64`: optional base64-encoded kubeconfig for the target DOKS
   cluster. If unset, the workflow uses the runner's existing kubeconfig.
 - `CLUSTER_OPTIMIZER_AWS_ACCESS_KEY_ID`: runtime access key for the

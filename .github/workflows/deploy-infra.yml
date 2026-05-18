@@ -23,7 +23,8 @@ jobs:
     runs-on: self-hosted
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
-      AWS_PROFILE: ${{ vars.AWS_PROFILE }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.MX1_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.MX1_AWS_SECRET_ACCESS_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -34,9 +35,14 @@ jobs:
             echo "AWS_REGION repository variable is required."
             exit 1
           }
-          if [ -n "${AWS_PROFILE}" ]; then
-            echo "Using AWS_PROFILE=${AWS_PROFILE}"
-          fi
+          test -n "${AWS_ACCESS_KEY_ID}" || {
+            echo "MX1_AWS_ACCESS_KEY_ID repository secret is required."
+            exit 1
+          }
+          test -n "${AWS_SECRET_ACCESS_KEY}" || {
+            echo "MX1_AWS_SECRET_ACCESS_KEY repository secret is required."
+            exit 1
+          }
           aws sts get-caller-identity
 
       - name: Deploy DynamoDB table
