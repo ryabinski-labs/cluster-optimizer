@@ -19,6 +19,12 @@ const els = {
   metricTwoNode: document.querySelector("#metricTwoNode"),
   metricRequestedMem: document.querySelector("#metricRequestedMem"),
   metricObservedMem: document.querySelector("#metricObservedMem"),
+  trendKicker: document.querySelector("#trendKicker"),
+  trendDays: document.querySelector("#trendDays"),
+  trendStable: document.querySelector("#trendStable"),
+  trendReady: document.querySelector("#trendReady"),
+  memoryChart: document.querySelector("#memoryChart"),
+  rollupList: document.querySelector("#rollupList"),
   timelineList: document.querySelector("#timelineList"),
   findingsList: document.querySelector("#findingsList"),
   errorPanel: document.querySelector("#errorPanel"),
@@ -93,6 +99,7 @@ function render() {
   els.emptyPanel.classList.toggle("hidden", reports.length !== 0);
   renderTimeline(reports);
   renderSummary(report);
+  renderTrends();
   renderFindings();
 }
 
@@ -143,6 +150,7 @@ function renderFindings() {
   els.findingsList.replaceChildren();
   const report = state.data?.reports?.[state.selectedIndex];
   if (!report) return;
+  const rollups = rollupMap();
   const findings = filteredFindings(report.findings || []);
   els.viewKicker.textContent = `${findings.length} visible`;
   els.viewTitle.textContent = `${state.severity === "all" ? "All" : titleCase(state.severity)} Recommendations`;
@@ -156,6 +164,8 @@ function renderFindings() {
   findings.forEach((finding) => {
     const card = document.createElement("article");
     card.className = `finding ${finding.severity || "low"}`;
+    const rollup = rollups.get(findingKey(finding));
+    const remediation = rollup?.remediation;
     card.innerHTML = `
       <header>
         <span class="severity">${escapeHtml(finding.severity || "unknown")}</span>
@@ -170,8 +180,143 @@ function renderFindings() {
         <div><dt>Cost effect</dt><dd>${escapeHtml(finding.expected_cost_effect || "")}</dd></div>
       </dl>
     `;
+    card.append(remediationRow(finding, rollup, remediation));
     els.findingsList.append(card);
   });
+}
+
+function renderTrends() {
+  const trend = state.data?.trend || {};
+  const window = trend.window || {};
+  const rollups = trend.top_recommendations || [];
+  const requiredDays = window.required_days || 3;
+  const persistent = rollups.filter((item) => item.latest_report_has && item.observed_days >= requiredDays).length;
+  const ready = rollups.filter((item) => item.remediation?.available).length;
+
+  els.trendKicker.textContent = `${window.report_count || 0} reports loaded`;
+  els.trendDays.textContent = String(window.observed_days || 0);
+  els.trendStable.textContent = String(persistent);
+  els.trendReady.textContent = String(ready);
+  renderMemoryChart(trend.series || []);
+  renderRollups(rollups, requiredDays);
+}
+
+function renderMemoryChart(series) {
+  els.memoryChart.replaceChildren();
+  if (series.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-list";
+    empty.textContent = "No trend data yet.";
+    els.memoryChart.append(empty);
+    return;
+  }
+  const width = 720;
+  const height = 180;
+  const pad = 18;
+  const maxValue = Math.max(
+    1,
+    ...series.map((point) => Number(point.requested_memory_mib || 0)),
+    ...series.map((point) => Number(point.observed_memory_mib || 0))
+  );
+  const x = (index) => {
+    if (series.length === 1) return width / 2;
+    return pad + (index * (width - pad * 2)) / (series.length - 1);
+  };
+  const y = (value) => height - pad - (Number(value || 0) / maxValue) * (height - pad * 2);
+  const line = (key) => series.map((point, index) => `${x(index)},${y(point[key])}`).join(" ");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.innerHTML = `
+    <path class="gridline" d="M${pad} ${height - pad}H${width - pad}" />
+    <polyline class="line requested" points="${line("requested_memory_mib")}" />
+    <polyline class="line observed" points="${line("observed_memory_mib")}" />
+    ${series.map((point, index) => `
+      <circle class="dot requested" cx="${x(index)}" cy="${y(point.requested_memory_mib)}" r="3">
+        <title>${formatTime(point.generated_at)} requested ${formatMiB(point.requested_memory_mib)}</title>
+      </circle>
+      <circle class="dot observed" cx="${x(index)}" cy="${y(point.observed_memory_mib)}" r="3">
+        <title>${formatTime(point.generated_at)} observed ${formatMiB(point.observed_memory_mib)}</title>
+      </circle>
+    `).join("")}
+  `;
+  const legend = document.createElement("div");
+  legend.className = "chart-legend";
+  legend.innerHTML = "<span><i class='requested'></i>Requested memory</span><span><i class='observed'></i>Observed memory</span>";
+  els.memoryChart.append(svg, legend);
+}
+
+function renderRollups(rollups, requiredDays) {
+  els.rollupList.replaceChildren();
+  if (rollups.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-list";
+    empty.textContent = "No recurring recommendations yet.";
+    els.rollupList.append(empty);
+    return;
+  }
+  rollups.slice(0, 8).forEach((rollup) => {
+    const row = document.createElement("article");
+    row.className = `rollup ${rollup.severity || "low"}${rollup.latest_report_has ? "" : " resolved"}`;
+    const progress = Math.min(100, Math.round(((rollup.observed_days || 0) / requiredDays) * 100));
+    row.innerHTML = `
+      <div>
+        <strong>${escapeHtml(rollup.scope)}</strong>
+        <span>${escapeHtml(rollup.rule_id)} · ${rollup.occurrences} report${rollup.occurrences === 1 ? "" : "s"}</span>
+      </div>
+      <div class="rollup-progress" title="${rollup.observed_days} observed day(s)">
+        <i style="width:${progress}%"></i>
+      </div>
+      <em>${rollup.latest_report_has ? `${rollup.observed_days}/${requiredDays} days` : "resolved"}</em>
+    `;
+    els.rollupList.append(row);
+  });
+}
+
+function remediationRow(finding, rollup, remediation) {
+  const row = document.createElement("div");
+  row.className = "remediation-row";
+  const status = document.createElement("span");
+  status.textContent = remediation?.reason || "No remediation data for this recommendation.";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "remediate-button";
+  button.textContent = "Remediate";
+  button.disabled = !remediation?.available;
+  button.title = remediation?.available ? "Create an api.yml pull request through CI/CD" : status.textContent;
+  button.addEventListener("click", () => dispatchRemediation(finding, button, status));
+  row.append(status, button);
+  return row;
+}
+
+async function dispatchRemediation(finding, button, status) {
+  const confirmed = window.confirm(`Create an api.yml remediation PR for ${scope(finding)}?`);
+  if (!confirmed) return;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "Dispatching";
+  try {
+    const response = await fetch("/api/remediations", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        cluster_id: state.data?.cluster_id || "default",
+        rule_id: finding.rule_id,
+        namespace: finding.namespace || "",
+        workload: finding.workload || "",
+        confirm: true
+      })
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || payload.remediation?.reason || `Request failed with ${response.status}`);
+    }
+    status.innerHTML = `Workflow dispatched. <a href="${escapeHtml(payload.workflow_url)}" target="_blank" rel="noreferrer">Open Actions</a>`;
+    button.textContent = "Dispatched";
+  } catch (error) {
+    status.textContent = error.message;
+    button.textContent = original;
+    button.disabled = false;
+  }
 }
 
 function filteredFindings(findings) {
@@ -193,6 +338,18 @@ function filteredFindings(findings) {
 function scope(finding) {
   if (finding.namespace && finding.workload) return `${finding.namespace}/${finding.workload}`;
   return finding.workload || "cluster";
+}
+
+function findingKey(finding) {
+  return [finding.rule_id || "", finding.namespace || "", finding.workload || ""].join("\u0000");
+}
+
+function rollupMap() {
+  const map = new Map();
+  (state.data?.trend?.top_recommendations || []).forEach((rollup) => {
+    map.set(rollup.key, rollup);
+  });
+  return map;
 }
 
 function showError(message) {

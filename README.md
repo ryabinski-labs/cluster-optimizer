@@ -57,7 +57,10 @@ Run the local DynamoDB-backed UI:
 ```
 
 Then open `http://127.0.0.1:8088`. The UI uses the default AWS credential
-chain, so `AWS_PROFILE=default` or your normal default profile works.
+chain, so `AWS_PROFILE=default` or your normal default profile works. The UI
+also calculates multi-report trends from DynamoDB and keeps remediation actions
+disabled until a recommendation has persisted for the configured observation
+window, which defaults to three days.
 
 Build and publish the image:
 
@@ -157,6 +160,9 @@ AWS infrastructure, and Kubernetes deployment:
   DynamoDB writer IAM policy.
 - `.github/workflows/deploy-kubernetes.yml`: deploys the Kubernetes RBAC,
   optional AWS Secret, and CronJob.
+- `.github/workflows/remediate-api-yml.yml`: creates a pull request against an
+  application repository for supported api.yml changes after the UI dispatches
+  an approved remediation.
 
 All jobs use `runs-on: self-hosted`. The existing actions runner image should
 include Docker, kubectl, AWS CLI, gh, doctl, an AWS profile for infrastructure
@@ -179,6 +185,9 @@ Repository secrets:
 - `CLUSTER_OPTIMIZER_AWS_SECRET_ACCESS_KEY`: matching runtime secret key.
 - `GHCR_PULL_TOKEN`: optional GitHub token with package read access. Set this
   only if the GHCR package is private.
+- `REMEDIATION_GITHUB_TOKEN`: GitHub token that can checkout, push branches to,
+  and create pull requests in target application repositories such as
+  `GipsyChef/echothread`.
 
 Create the kubeconfig secret only when the runner does not already have cluster
 access:
@@ -202,6 +211,29 @@ Run order:
 2. `Publish Image`
 3. `Deploy AWS Infra`
 4. `Deploy Kubernetes`
+
+## Remediation Workflow
+
+Remediation remains opt-in. The local UI shows recurring recommendation trends,
+but the `Remediate` button is disabled until the same workload/rule has been
+seen for at least `MIN_REMEDIATION_DAYS` days. The default is `3`.
+
+Supported first-pass remediations are intentionally narrow:
+
+- CPU request tuning in `api.yml`.
+- Memory request tuning in `api.yml`.
+- Single-replica PDB drain fixes in `api.yml`.
+
+Workloads must be mapped before the button can become available. Edit
+`config/remediation-targets.json` to point a Kubernetes workload at its
+application repository, manifest path, and container name. When clicked, the UI
+dispatches `.github/workflows/remediate-api-yml.yml`; that workflow checks out
+the target repo, patches `api.yml`, and opens a PR.
+
+For local UI dispatch, either export `GITHUB_TOKEN` / `GH_TOKEN` or authenticate
+the GitHub CLI with `gh auth login`. The in-repository workflow still needs
+`REMEDIATION_GITHUB_TOKEN` as a repository secret so the self-hosted runner can
+create PRs in the application repositories.
 
 ## DynamoDB Model
 

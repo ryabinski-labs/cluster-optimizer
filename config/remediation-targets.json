@@ -1,0 +1,17 @@
+{
+  "targets": [
+    {
+      "cluster_id": "default",
+      "namespace": "default",
+      "workload": "Deployment/echothread-api",
+      "repository": "GipsyChef/echothread",
+      "manifest_path": "api.yml",
+      "container": "echothread-api",
+      "supported_rules": [
+        "memory-request-below-usage",
+        "cpu-request-over-provisioned",
+        "single-replica-pdb-blocks-drain"
+      ]
+    }
+  ]
+}

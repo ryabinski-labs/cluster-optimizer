@@ -1,0 +1,137 @@
+name: Remediate api.yml
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_id:
+        description: Cluster identifier that produced the recommendation.
+        required: true
+        type: string
+      rule_id:
+        description: Recommendation rule id.
+        required: true
+        type: string
+      namespace:
+        description: Kubernetes namespace.
+        required: true
+        type: string
+      workload:
+        description: Workload in Kind/name form.
+        required: true
+        type: string
+      repository:
+        description: Target repository, for example GipsyChef/echothread.
+        required: true
+        type: string
+      manifest_path:
+        description: api.yml path in the target repository.
+        required: true
+        type: string
+      container:
+        description: Container name for resource request changes.
+        required: false
+        type: string
+      target_cpu:
+        description: Optional target CPU request.
+        required: false
+        type: string
+      target_memory:
+        description: Optional target memory request.
+        required: false
+        type: string
+      observed_days:
+        description: Number of days the finding has persisted.
+        required: true
+        type: string
+      occurrences:
+        description: Number of reports containing the finding.
+        required: true
+        type: string
+      evidence:
+        description: Recommendation evidence.
+        required: true
+        type: string
+      recommendation:
+        description: Recommendation text.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  remediate:
+    name: Create api.yml PR
+    runs-on: self-hosted
+    steps:
+      - name: Checkout optimizer
+        uses: actions/checkout@v5
+        with:
+          path: optimizer
+
+      - name: Checkout target repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository }}
+          token: ${{ secrets.REMEDIATION_GITHUB_TOKEN }}
+          path: target
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: optimizer/go.mod
+          cache-dependency-path: optimizer/go.sum
+
+      - name: Patch api.yml
+        working-directory: optimizer
+        run: |
+          go run ./cmd/api-yml-remediator \
+            --file "../target/${{ inputs.manifest_path }}" \
+            --workload "${{ inputs.workload }}" \
+            --container "${{ inputs.container }}" \
+            --rule-id "${{ inputs.rule_id }}" \
+            --cpu-request "${{ inputs.target_cpu }}" \
+            --memory-request "${{ inputs.target_memory }}"
+
+      - name: Create pull request
+        working-directory: target
+        env:
+          GH_TOKEN: ${{ secrets.REMEDIATION_GITHUB_TOKEN }}
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          RULE_ID: ${{ inputs.rule_id }}
+          WORKLOAD: ${{ inputs.workload }}
+          NAMESPACE: ${{ inputs.namespace }}
+          OBSERVED_DAYS: ${{ inputs.observed_days }}
+          OCCURRENCES: ${{ inputs.occurrences }}
+          EVIDENCE: ${{ inputs.evidence }}
+          RECOMMENDATION: ${{ inputs.recommendation }}
+        run: |
+          branch="cluster-optimizer/${RULE_ID}-${GITHUB_RUN_ID}"
+          git config user.name "cluster-optimizer"
+          git config user.email "cluster-optimizer@users.noreply.github.com"
+          git checkout -b "${branch}"
+          git add "${{ inputs.manifest_path }}"
+          git diff --cached --quiet && {
+            echo "No api.yml changes produced."
+            exit 1
+          }
+          git commit -m "Tune ${WORKLOAD} from cluster optimizer"
+          git push --set-upstream origin "${branch}"
+          gh pr create \
+            --repo "${TARGET_REPOSITORY}" \
+            --base main \
+            --head "${branch}" \
+            --title "Tune ${WORKLOAD} from cluster optimizer" \
+            --body "$(cat <<BODY
+Cluster Optimizer observed a persistent recommendation and generated this api.yml patch.
+
+- Namespace: ${NAMESPACE}
+- Workload: ${WORKLOAD}
+- Rule: ${RULE_ID}
+- Observed window: ${OBSERVED_DAYS} day(s), ${OCCURRENCES} report occurrence(s)
+- Evidence: ${EVIDENCE}
+- Recommendation: ${RECOMMENDATION}
+
+Validate rollout metrics before merging: pod restarts, OOMKilled events, latency, CPU throttling, and node bin-packing.
+BODY
+)"

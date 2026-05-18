@@ -301,7 +301,8 @@ button {
 }
 
 .timeline,
-.findings-panel {
+.findings-panel,
+.trend-panel {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: rgba(255, 253, 247, 0.74);
@@ -335,6 +336,181 @@ button {
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
+}
+
+.trend-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.trend-stats span {
+  display: grid;
+  min-width: 118px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.trend-stats b {
+  font-family: ui-serif, Georgia, "Times New Roman", serif;
+  font-size: 22px;
+  font-weight: 500;
+}
+
+.trend-stats em {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.trend-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  gap: 10px;
+  padding: 10px;
+}
+
+.chart-wrap,
+.rollup-list {
+  min-height: 234px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.chart {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.chart svg {
+  width: 100%;
+  min-height: 190px;
+}
+
+.gridline {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+.line {
+  fill: none;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  stroke-width: 2.5;
+}
+
+.line.requested,
+.dot.requested,
+.chart-legend .requested {
+  color: var(--blue);
+  stroke: currentColor;
+  fill: currentColor;
+}
+
+.line.observed,
+.dot.observed,
+.chart-legend .observed {
+  color: var(--green);
+  stroke: currentColor;
+  fill: currentColor;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.chart-legend span {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.chart-legend i {
+  width: 18px;
+  height: 3px;
+  border-radius: 99px;
+}
+
+.rollup-list {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 10px;
+}
+
+.rollup {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 54px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: #fffdf7;
+}
+
+.rollup.high {
+  border-left-color: var(--red);
+}
+
+.rollup.medium {
+  border-left-color: var(--amber);
+}
+
+.rollup.low {
+  border-left-color: var(--blue);
+}
+
+.rollup.resolved {
+  opacity: 0.62;
+}
+
+.rollup strong,
+.rollup span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rollup strong {
+  font-size: 13px;
+}
+
+.rollup span,
+.rollup em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.rollup-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #e7e1d2;
+}
+
+.rollup-progress i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
 }
 
 .filter input {
@@ -432,6 +608,43 @@ code {
   line-height: 1.45;
 }
 
+.remediation-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.remediation-row a {
+  color: var(--blue);
+  font-weight: 800;
+}
+
+.remediate-button {
+  flex: 0 0 auto;
+  min-width: 104px;
+  height: 34px;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.remediate-button:disabled {
+  border-color: var(--line-strong);
+  background: #e3ded0;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 dl {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -474,6 +687,10 @@ dd {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .trend-grid {
+    grid-template-columns: 1fr;
+  }
+
   dl {
     grid-template-columns: 1fr;
   }
@@ -492,6 +709,15 @@ dd {
   .finding header {
     grid-template-columns: 1fr;
     align-items: start;
+  }
+
+  .rollup {
+    grid-template-columns: 1fr;
+  }
+
+  .remediation-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .filter input {

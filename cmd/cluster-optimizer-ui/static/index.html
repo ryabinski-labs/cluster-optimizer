@@ -74,6 +74,26 @@
           </div>
         </section>
 
+        <section class="trend-panel" aria-label="Aggregations and trends">
+          <header class="panel-head">
+            <div>
+              <p id="trendKicker">Trend Window</p>
+              <h2>Signals Over Time</h2>
+            </div>
+            <div class="trend-stats">
+              <span><b id="trendDays">0</b><em>observed days</em></span>
+              <span><b id="trendStable">0</b><em>persistent rules</em></span>
+              <span><b id="trendReady">0</b><em>ready to remediate</em></span>
+            </div>
+          </header>
+          <div class="trend-grid">
+            <div class="chart-wrap">
+              <div id="memoryChart" class="chart" aria-label="Requested and observed memory trend"></div>
+            </div>
+            <div id="rollupList" class="rollup-list" aria-label="Recurring recommendations"></div>
+          </div>
+        </section>
+
         <section id="errorPanel" class="error-panel hidden" role="alert"></section>
         <section id="emptyPanel" class="empty-panel hidden">
           <h2>No reports found</h2>
