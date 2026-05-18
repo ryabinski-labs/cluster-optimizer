@@ -57,12 +57,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout optimizer
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           path: optimizer
 
       - name: Checkout target repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ inputs.repository }}
           token: ${{ secrets.REMEDIATION_GITHUB_TOKEN }}
