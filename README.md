@@ -10,6 +10,13 @@ optimization is cluster-scoped, so a single scheduled pod can inspect the API
 server with read-only RBAC. Running one pod per node would add cost and
 permissions without improving the analysis.
 
+## Project Status
+
+Cluster Optimizer is early-stage software. The core analyzer, CronJob deployment
+examples, optional DynamoDB persistence, and local UI are available, but the
+recommendation set is intentionally conservative and should be reviewed before
+changes are applied to production workloads.
+
 ## Product Principles
 
 - Read-only by default. The tool recommends changes; it does not mutate
@@ -149,8 +156,8 @@ With `DYNAMODB_TABLE`, it writes the same report to DynamoDB after printing it.
 
 ## GitHub Actions Deployment
 
-The repository includes self-hosted-runner workflows for CI, image publishing,
-AWS infrastructure, and Kubernetes deployment:
+The repository includes GitHub-hosted-runner workflows for CI, image publishing,
+AWS infrastructure, Kubernetes deployment, and opt-in remediation pull requests:
 
 - `.github/workflows/ci.yml`: runs `go mod tidy`, `go test ./...`, and
   `go vet ./...`.
@@ -167,22 +174,22 @@ AWS infrastructure, and Kubernetes deployment:
   in an application repository with `instructions.md` for runtime
   modernization recommendations such as Go rewrites.
 
-All jobs use `runs-on: self-hosted`. The existing actions runner image should
-include Docker, kubectl, AWS CLI, gh, doctl, an AWS profile for infrastructure
-deployment, and a kubeconfig for the DOKS cluster. CI installs Go through
-`actions/setup-go`, so Go does not need to be baked into the runner image.
+All jobs use GitHub-managed `ubuntu-latest` runners. Workflows install Go with
+`actions/setup-go`; Docker and GitHub CLI are available on the hosted runner;
+the Kubernetes deployment workflow installs `kubectl`.
 
 Repository variables:
 
 - `AWS_REGION`: AWS region used by the infrastructure workflow.
+- `AWS_ROLE_TO_ASSUME`: AWS IAM role ARN assumed by the infrastructure workflow
+  through GitHub Actions OIDC. The example role template is
+  `infra/cloudformation/github-actions-deploy-role.yaml`.
 
 Repository secrets:
 
-- `MX1_AWS_ACCESS_KEY_ID`: deployment access key for
-  `mx1-github-actions-runner`.
-- `MX1_AWS_SECRET_ACCESS_KEY`: matching deployment secret key.
 - `DOKS_KUBECONFIG_B64`: optional base64-encoded kubeconfig for the target DOKS
-  cluster. If unset, the workflow uses the runner's existing kubeconfig.
+  cluster. Hosted runners do not have a pre-existing kubeconfig, so set this
+  secret before running `.github/workflows/deploy-kubernetes.yml`.
 - `CLUSTER_OPTIMIZER_AWS_ACCESS_KEY_ID`: runtime access key for the
   in-cluster optimizer when DynamoDB persistence is enabled.
 - `CLUSTER_OPTIMIZER_AWS_SECRET_ACCESS_KEY`: matching runtime secret key.
@@ -245,7 +252,7 @@ separate reviewed branch after profiling and owner approval.
 
 For local UI dispatch, either export `GITHUB_TOKEN` / `GH_TOKEN` or authenticate
 the GitHub CLI with `gh auth login`. The in-repository workflow still needs
-`REMEDIATION_GITHUB_TOKEN` as a repository secret so the self-hosted runner can
+`REMEDIATION_GITHUB_TOKEN` as a repository secret so the hosted runner can
 create PRs in the application repositories.
 
 ## DynamoDB Model
@@ -292,3 +299,15 @@ The optimizer should stay materially smaller than the workloads it advises.
 The default CronJob requests `20m` CPU and `64Mi` memory with a `100m` /
 `128Mi` limit. If a cluster is large enough to need more, tune the job rather
 than deploying it as a DaemonSet.
+
+## Support
+
+Support is best-effort through GitHub issues. Do not include credentials,
+kubeconfigs, private cluster reports, or customer data in public issues. See
+[SUPPORT.md](./SUPPORT.md) and [SECURITY.md](./SECURITY.md) for support and
+vulnerability reporting boundaries.
+
+## License
+
+Cluster Optimizer is licensed under the Apache License 2.0. See
+[LICENSE](./LICENSE).

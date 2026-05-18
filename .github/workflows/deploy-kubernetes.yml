@@ -33,16 +33,23 @@ permissions:
   contents: read
   packages: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   IMAGE_NAME: ghcr.io/gipsychef/cluster-optimizer
 
 jobs:
   deploy:
     name: Deploy CronJob
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
 
       - name: Configure kubeconfig
         env:
@@ -71,7 +78,7 @@ jobs:
             -n cluster-optimizer \
             --docker-server=ghcr.io \
             --docker-username="${{ github.actor }}" \
-            --docker-password="${GHCR_PULL_TOKEN}" \
+            --docker-password "${GHCR_PULL_TOKEN}" \
             --dry-run=client \
             -o yaml | kubectl apply -f -
           kubectl patch serviceaccount cluster-optimizer \

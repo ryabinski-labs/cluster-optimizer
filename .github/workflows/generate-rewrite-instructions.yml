@@ -31,10 +31,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   plan:
     name: Create rewrite instructions PR
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout optimizer
         uses: actions/checkout@v5

@@ -1,0 +1,12 @@
+# CODEOWNERS documents ownership for sensitive paths. Branch protection should
+# require status checks and restrict default-branch updates to maintainers.
+
+* @GipsyChef
+
+/.github/ @GipsyChef
+/SECURITY.md @GipsyChef
+/MAINTAINERS.md @GipsyChef
+/infra/ @GipsyChef
+/manifests/ @GipsyChef
+/examples/ @GipsyChef
+/internal/store/ @GipsyChef

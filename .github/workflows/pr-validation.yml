@@ -1,0 +1,99 @@
+name: PR Validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        if: ${{ hashFiles('package.json') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: npm
+
+      - name: Validate JavaScript or TypeScript project
+        if: ${{ hashFiles('package.json') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ -f yarn.lock ]; then
+            corepack enable
+            yarn install --immutable
+          else
+            npm install
+          fi
+          npm run lint --if-present
+          npm test --if-present
+          npm run build --if-present
+
+      - name: Set up Python
+        if: ${{ hashFiles('pyproject.toml', 'setup.py', 'requirements.txt', 'requirements-dev.txt', 'tests/**/*.py') != '' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          cache: pip
+
+      - name: Validate Python project
+        if: ${{ hashFiles('pyproject.toml', 'setup.py', 'requirements.txt', 'requirements-dev.txt', 'tests/**/*.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then python -m pip install -e .; fi
+          if [ -d tests ] || find . -maxdepth 3 \( -name 'test_*.py' -o -name '*_test.py' \) -print -quit | grep -q .; then
+            python -m pip install pytest
+            python -m pytest
+          fi
+
+      - name: Set up Go
+        if: ${{ hashFiles('go.mod') != '' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Validate Go project
+        if: ${{ hashFiles('go.mod') != '' }}
+        run: go test ./...
+
+      - name: Validate Rust project
+        if: ${{ hashFiles('Cargo.toml') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all-features
+
+      - name: Run project validate target
+        if: ${{ hashFiles('Makefile') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -Eq '^validate:' Makefile; then
+            make validate
+          fi
