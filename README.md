@@ -135,6 +135,86 @@ kubectl apply -f examples/cronjob-dynamodb.yaml
 Without `DYNAMODB_TABLE`, the optimizer writes the report to stdout only.
 With `DYNAMODB_TABLE`, it writes the same report to DynamoDB after printing it.
 
+## GitHub Actions Deployment
+
+The repository includes self-hosted-runner workflows for CI, image publishing,
+AWS infrastructure, and Kubernetes deployment:
+
+- `.github/workflows/ci.yml`: runs `go mod tidy`, `go test ./...`, and
+  `go vet ./...`.
+- `.github/workflows/publish-image.yml`: builds and pushes
+  `ghcr.io/gipsychef/cluster-optimizer`.
+- `.github/workflows/deploy-infra.yml`: deploys the DynamoDB table and the
+  DynamoDB writer IAM policy.
+- `.github/workflows/deploy-kubernetes.yml`: deploys the Kubernetes RBAC,
+  optional AWS Secret, and CronJob.
+
+All jobs use `runs-on: self-hosted`. The existing actions runner image should
+include Docker, kubectl, AWS CLI, gh, and doctl. CI installs Go through
+`actions/setup-go`, so Go does not need to be baked into the runner image.
+
+Repository variables:
+
+- `AWS_REGION`: AWS region used by the infrastructure workflow.
+
+Repository secrets:
+
+- `AWS_DEPLOY_ROLE_ARN`: IAM role ARN assumed by GitHub Actions through OIDC
+  for CloudFormation deployments.
+- `DOKS_KUBECONFIG_B64`: base64-encoded kubeconfig for the target DOKS cluster.
+- `CLUSTER_OPTIMIZER_AWS_ACCESS_KEY_ID`: runtime access key for the
+  in-cluster optimizer when DynamoDB persistence is enabled.
+- `CLUSTER_OPTIMIZER_AWS_SECRET_ACCESS_KEY`: matching runtime secret key.
+- `GHCR_PULL_TOKEN`: optional GitHub token with package read access. Set this
+  only if the GHCR package is private.
+
+The infra workflow uses short-lived AWS credentials through GitHub OIDC. If the
+AWS account does not already have the GitHub OIDC provider, create it once:
+
+```bash
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com
+```
+
+Then create the deploy role and save the `RoleArn` output as
+`AWS_DEPLOY_ROLE_ARN`:
+
+```bash
+aws cloudformation deploy \
+  --stack-name cluster-optimizer-github-deploy-role \
+  --template-file infra/cloudformation/github-actions-deploy-role.yaml \
+  --parameter-overrides \
+    GitHubOwner=GipsyChef \
+    GitHubRepo=cluster-optimizer \
+    GitHubRef=refs/heads/main \
+    TableName=cluster-optimizer-reports \
+    PolicyName=cluster-optimizer-dynamodb-writer \
+  --capabilities CAPABILITY_NAMED_IAM
+```
+
+Create the kubeconfig secret from a local kubeconfig:
+
+```bash
+base64 -i ~/.kube/config | gh secret set DOKS_KUBECONFIG_B64
+```
+
+For DynamoDB persistence, create the runtime IAM user/access key as described
+above and store the values:
+
+```bash
+gh secret set CLUSTER_OPTIMIZER_AWS_ACCESS_KEY_ID
+gh secret set CLUSTER_OPTIMIZER_AWS_SECRET_ACCESS_KEY
+gh variable set AWS_REGION --body us-east-1
+```
+
+Run order:
+
+1. `CI`
+2. `Publish Image`
+3. `Deploy AWS Infra`
+4. `Deploy Kubernetes`
+
 ## DynamoDB Model
 
 One table is enough for the first version:

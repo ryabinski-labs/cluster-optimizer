@@ -1,0 +1,125 @@
+name: Deploy Kubernetes
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag to deploy.
+        default: latest
+        required: true
+        type: string
+      cluster_id:
+        description: Logical cluster identifier in reports.
+        default: default
+        required: true
+        type: string
+      enable_dynamodb:
+        description: Persist reports to DynamoDB.
+        default: true
+        required: true
+        type: boolean
+      dynamodb_table:
+        description: DynamoDB table name.
+        default: cluster-optimizer-reports
+        required: true
+        type: string
+      aws_region:
+        description: AWS region for DynamoDB.
+        default: us-east-1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  IMAGE_NAME: ghcr.io/gipsychef/cluster-optimizer
+
+jobs:
+  deploy:
+    name: Deploy CronJob
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure kubeconfig
+        env:
+          KUBECONFIG_B64: ${{ secrets.DOKS_KUBECONFIG_B64 }}
+        run: |
+          test -n "${KUBECONFIG_B64}" || {
+            echo "DOKS_KUBECONFIG_B64 secret is required."
+            exit 1
+          }
+          mkdir -p "${HOME}/.kube"
+          echo "${KUBECONFIG_B64}" | base64 -d > "${HOME}/.kube/config"
+          chmod 600 "${HOME}/.kube/config"
+
+      - name: Apply read-only RBAC
+        run: kubectl apply -f manifests/rbac.yaml
+
+      - name: Configure optional GHCR pull secret
+        env:
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        run: |
+          if [ -z "${GHCR_PULL_TOKEN}" ]; then
+            echo "GHCR_PULL_TOKEN not set; assuming the image is public or nodes can already pull it."
+            exit 0
+          fi
+
+          kubectl create secret docker-registry ghcr-pull \
+            -n cluster-optimizer \
+            --docker-server=ghcr.io \
+            --docker-username="${{ github.actor }}" \
+            --docker-password="${GHCR_PULL_TOKEN}" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+          kubectl patch serviceaccount cluster-optimizer \
+            -n cluster-optimizer \
+            --type merge \
+            -p '{"imagePullSecrets":[{"name":"ghcr-pull"}]}'
+
+      - name: Configure DynamoDB Secret
+        if: ${{ inputs.enable_dynamodb }}
+        env:
+          APP_AWS_ACCESS_KEY_ID: ${{ secrets.CLUSTER_OPTIMIZER_AWS_ACCESS_KEY_ID }}
+          APP_AWS_SECRET_ACCESS_KEY: ${{ secrets.CLUSTER_OPTIMIZER_AWS_SECRET_ACCESS_KEY }}
+        run: |
+          test -n "${APP_AWS_ACCESS_KEY_ID}" || {
+            echo "CLUSTER_OPTIMIZER_AWS_ACCESS_KEY_ID secret is required when DynamoDB is enabled."
+            exit 1
+          }
+          test -n "${APP_AWS_SECRET_ACCESS_KEY}" || {
+            echo "CLUSTER_OPTIMIZER_AWS_SECRET_ACCESS_KEY secret is required when DynamoDB is enabled."
+            exit 1
+          }
+          kubectl create secret generic cluster-optimizer-aws \
+            -n cluster-optimizer \
+            --from-literal=AWS_ACCESS_KEY_ID="${APP_AWS_ACCESS_KEY_ID}" \
+            --from-literal=AWS_SECRET_ACCESS_KEY="${APP_AWS_SECRET_ACCESS_KEY}" \
+            --from-literal=AWS_REGION="${{ inputs.aws_region }}" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Deploy CronJob
+        env:
+          ENABLE_DYNAMODB: ${{ inputs.enable_dynamodb }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          CLUSTER_ID: ${{ inputs.cluster_id }}
+          DYNAMODB_TABLE: ${{ inputs.dynamodb_table }}
+        run: |
+          manifest="manifests/cronjob.yaml"
+          if [ "${ENABLE_DYNAMODB}" = "true" ]; then
+            manifest="examples/cronjob-dynamodb.yaml"
+          fi
+
+          kubectl set image -f "${manifest}" optimizer="${IMAGE_NAME}:${IMAGE_TAG}" --local -o yaml |
+            sed "s/value: \"default\"/value: \"${CLUSTER_ID}\"/" |
+            sed "s/value: cluster-optimizer-reports/value: ${DYNAMODB_TABLE}/" |
+            kubectl apply -f -
+
+      - name: Show deployment
+        run: |
+          kubectl get cronjob -n cluster-optimizer cluster-optimizer
+          kubectl get serviceaccount -n cluster-optimizer cluster-optimizer

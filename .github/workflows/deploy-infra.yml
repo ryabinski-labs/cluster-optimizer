@@ -1,0 +1,70 @@
+name: Deploy AWS Infra
+
+on:
+  workflow_dispatch:
+    inputs:
+      table_name:
+        description: DynamoDB table name for report history.
+        default: cluster-optimizer-reports
+        required: true
+        type: string
+      policy_name:
+        description: IAM managed policy name for DynamoDB writer access.
+        default: cluster-optimizer-dynamodb-writer
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy DynamoDB and IAM
+    runs-on: self-hosted
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Validate inputs
+        run: |
+          test -n "${AWS_REGION}" || {
+            echo "AWS_REGION repository variable is required."
+            exit 1
+          }
+          test -n "${{ secrets.AWS_DEPLOY_ROLE_ARN }}" || {
+            echo "AWS_DEPLOY_ROLE_ARN repository secret is required."
+            exit 1
+          }
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy DynamoDB table
+        run: |
+          aws cloudformation deploy \
+            --stack-name cluster-optimizer-dynamodb \
+            --template-file infra/cloudformation/dynamodb-table.yaml \
+            --parameter-overrides TableName=${{ inputs.table_name }}
+
+      - name: Deploy DynamoDB writer policy
+        run: |
+          aws cloudformation deploy \
+            --stack-name cluster-optimizer-dynamodb-writer-policy \
+            --template-file infra/cloudformation/dynamodb-writer-policy.yaml \
+            --parameter-overrides TableName=${{ inputs.table_name }} PolicyName=${{ inputs.policy_name }} \
+            --capabilities CAPABILITY_NAMED_IAM
+
+      - name: Show outputs
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name cluster-optimizer-dynamodb \
+            --query "Stacks[0].Outputs"
+          aws cloudformation describe-stacks \
+            --stack-name cluster-optimizer-dynamodb-writer-policy \
+            --query "Stacks[0].Outputs"

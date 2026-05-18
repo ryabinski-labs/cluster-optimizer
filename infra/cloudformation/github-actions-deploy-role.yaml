@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: GitHub Actions OIDC role for deploying Cluster Optimizer AWS infrastructure.
+Parameters:
+  GitHubOwner:
+    Type: String
+    Default: GipsyChef
+  GitHubRepo:
+    Type: String
+    Default: cluster-optimizer
+  GitHubRef:
+    Type: String
+    Default: refs/heads/main
+  RoleName:
+    Type: String
+    Default: cluster-optimizer-github-deploy
+  TableName:
+    Type: String
+    Default: cluster-optimizer-reports
+  PolicyName:
+    Type: String
+    Default: cluster-optimizer-dynamodb-writer
+Resources:
+  GitHubActionsDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOwner}/${GitHubRepo}:ref:${GitHubRef}
+      Policies:
+        - PolicyName: cluster-optimizer-infra-deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ManageClusterOptimizerStacks
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:UpdateStack
+                  - cloudformation:ValidateTemplate
+                Resource: "*"
+              - Sid: ManageReportsTable
+                Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:DescribeTable
+                  - dynamodb:TagResource
+                  - dynamodb:UpdateContinuousBackups
+                  - dynamodb:UpdateTable
+                  - dynamodb:UpdateTimeToLive
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${TableName}
+              - Sid: ManageWriterPolicy
+                Effect: Allow
+                Action:
+                  - iam:CreatePolicy
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicy
+                  - iam:DeletePolicyVersion
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListPolicyVersions
+                  - iam:SetDefaultPolicyVersion
+                  - iam:TagPolicy
+                  - iam:UntagPolicy
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${PolicyName}
+Outputs:
+  RoleArn:
+    Value: !GetAtt GitHubActionsDeployRole.Arn
