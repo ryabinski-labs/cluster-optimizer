@@ -289,6 +289,16 @@ function remediationRow(finding, rollup, remediation) {
 }
 
 async function dispatchRemediation(finding, button, status) {
+  const rollup = rollupMap().get(findingKey(finding));
+  if (rollup?.remediation?.action === "rewrite_plan") {
+    const clusterId = encodeURIComponent(state.data?.cluster_id || "default");
+    const ruleId = encodeURIComponent(finding.rule_id);
+    const namespace = encodeURIComponent(finding.namespace || "");
+    const workload = encodeURIComponent(finding.workload || "");
+    window.location.href = `/api/remediations/download?cluster_id=${clusterId}&rule_id=${ruleId}&namespace=${namespace}&workload=${workload}`;
+    return;
+  }
+
   const action = button.textContent || "Remediate";
   const confirmed = window.confirm(`${action} for ${scope(finding)}?`);
   if (!confirmed) return;
