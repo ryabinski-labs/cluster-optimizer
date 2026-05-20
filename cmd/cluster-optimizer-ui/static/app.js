@@ -300,34 +300,38 @@ async function dispatchRemediation(finding, button, status) {
   }
 
   const action = button.textContent || "Remediate";
-  const confirmed = window.confirm(`${action} for ${scope(finding)}?`);
-  if (!confirmed) return;
-  button.disabled = true;
-  const original = button.textContent;
-  button.textContent = "Dispatching";
-  try {
-    const response = await fetch("/api/remediations", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        cluster_id: state.data?.cluster_id || "default",
-        rule_id: finding.rule_id,
-        namespace: finding.namespace || "",
-        workload: finding.workload || "",
-        confirm: true
-      })
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.error || payload.remediation?.reason || `Request failed with ${response.status}`);
+  showConfirm(
+    "Remediation Confirmation",
+    `Are you sure you want to run ${action} for ${scope(finding)}?`,
+    async () => {
+      button.disabled = true;
+      const original = button.textContent;
+      button.textContent = "Dispatching";
+      try {
+        const response = await fetch("/api/remediations", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            cluster_id: state.data?.cluster_id || "default",
+            rule_id: finding.rule_id,
+            namespace: finding.namespace || "",
+            workload: finding.workload || "",
+            confirm: true
+          })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || payload.remediation?.reason || `Request failed with ${response.status}`);
+        }
+        status.innerHTML = `Workflow dispatched. <a href="${escapeHtml(payload.workflow_url)}" target="_blank" rel="noreferrer">Open Actions</a>`;
+        button.textContent = "Dispatched";
+      } catch (error) {
+        status.textContent = error.message;
+        button.textContent = original;
+        button.disabled = false;
+      }
     }
-    status.innerHTML = `Workflow dispatched. <a href="${escapeHtml(payload.workflow_url)}" target="_blank" rel="noreferrer">Open Actions</a>`;
-    button.textContent = "Dispatched";
-  } catch (error) {
-    status.textContent = error.message;
-    button.textContent = original;
-    button.disabled = false;
-  }
+  );
 }
 
 function actionTitle(remediation) {
@@ -406,4 +410,45 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function showConfirm(title, message, onConfirm) {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+
+  const card = document.createElement("div");
+  card.className = "modal-card";
+
+  const h2 = document.createElement("h2");
+  h2.textContent = title;
+
+  const p = document.createElement("p");
+  p.textContent = message;
+
+  const actions = document.createElement("div");
+  actions.className = "modal-actions";
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "modal-button cancel";
+  cancelBtn.textContent = "Cancel";
+
+  const confirmBtn = document.createElement("button");
+  confirmBtn.type = "button";
+  confirmBtn.className = "modal-button confirm";
+  confirmBtn.textContent = "OK";
+
+  cancelBtn.addEventListener("click", () => {
+    overlay.remove();
+  });
+
+  confirmBtn.addEventListener("click", () => {
+    overlay.remove();
+    onConfirm();
+  });
+
+  actions.append(cancelBtn, confirmBtn);
+  card.append(h2, p, actions);
+  overlay.append(card);
+  document.body.append(overlay);
 }
