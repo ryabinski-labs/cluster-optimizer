@@ -232,17 +232,23 @@ func (s *server) handleReports(w http.ResponseWriter, r *http.Request) {
 		limit = int32(value)
 	}
 
-	reports, err := s.queryReports(ctx, clusterID, limit)
+	allReports, err := s.queryReports(ctx, clusterID, 100)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+
+	reports := allReports
+	if int(limit) < len(allReports) {
+		reports = allReports[:limit]
+	}
+
 	writeJSON(w, http.StatusOK, apiResponse{
 		ClusterID: clusterID,
 		Table:     s.table,
 		Region:    s.region,
 		Reports:   reports,
-		Trend:     s.buildTrend(reports),
+		Trend:     s.buildTrend(ctx, allReports),
 	})
 }
 
@@ -271,7 +277,7 @@ func (s *server) handleRemediation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	rollups := s.rollups(reports)
+	rollups := s.rollups(ctx, reports)
 	rollup, ok := rollups[findingKey(req.RuleID, req.Namespace, req.Workload)]
 	if !ok {
 		writeError(w, http.StatusNotFound, "recommendation was not found in recent reports")
@@ -300,28 +306,41 @@ func (s *server) handleRemediation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) queryReports(ctx context.Context, clusterID string, limit int32) ([]reportRecord, error) {
-	out, err := s.client.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String(s.table),
-		KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :sk_prefix)"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk":        &types.AttributeValueMemberS{Value: "CLUSTER#" + clusterID},
-			":sk_prefix": &types.AttributeValueMemberS{Value: "REPORT#"},
-		},
-		ScanIndexForward: aws.Bool(false),
-		Limit:            aws.Int32(limit),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("query DynamoDB reports: %w", err)
+	var reports []reportRecord
+	var lastEvaluatedKey map[string]types.AttributeValue
+
+	for int32(len(reports)) < limit {
+		input := &dynamodb.QueryInput{
+			TableName:              aws.String(s.table),
+			KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :sk_prefix)"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":pk":        &types.AttributeValueMemberS{Value: "CLUSTER#" + clusterID},
+				":sk_prefix": &types.AttributeValueMemberS{Value: "REPORT#"},
+			},
+			ScanIndexForward:  aws.Bool(false),
+			Limit:             aws.Int32(limit - int32(len(reports))),
+			ExclusiveStartKey: lastEvaluatedKey,
+		}
+
+		out, err := s.client.Query(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("query DynamoDB reports: %w", err)
+		}
+
+		for _, item := range out.Items {
+			record, err := decodeReport(item)
+			if err != nil {
+				return nil, err
+			}
+			reports = append(reports, record)
+		}
+
+		if out.LastEvaluatedKey == nil {
+			break
+		}
+		lastEvaluatedKey = out.LastEvaluatedKey
 	}
 
-	reports := make([]reportRecord, 0, len(out.Items))
-	for _, item := range out.Items {
-		record, err := decodeReport(item)
-		if err != nil {
-			return nil, err
-		}
-		reports = append(reports, record)
-	}
 	return reports, nil
 }
 
@@ -342,7 +361,7 @@ func decodeReport(item map[string]types.AttributeValue) (reportRecord, error) {
 	}, nil
 }
 
-func (s *server) buildTrend(reports []reportRecord) trendResponse {
+func (s *server) buildTrend(ctx context.Context, reports []reportRecord) trendResponse {
 	series := make([]trendPoint, 0, len(reports))
 	for i := len(reports) - 1; i >= 0; i-- {
 		report := reports[i]
@@ -369,7 +388,7 @@ func (s *server) buildTrend(reports []reportRecord) trendResponse {
 			TwoNodeFeasible:    twoNodeFeasible(report.Summary),
 		})
 	}
-	rollups := s.rollups(reports)
+	rollups := s.rollups(ctx, reports)
 	top := make([]recommendationRollup, 0, len(rollups))
 	for _, rollup := range rollups {
 		top = append(top, rollup)
@@ -396,7 +415,77 @@ func (s *server) buildTrend(reports []reportRecord) trendResponse {
 	}
 }
 
-func (s *server) rollups(reports []reportRecord) map[string]recommendationRollup {
+func strAttr(item map[string]types.AttributeValue, key string) string {
+	if val, ok := item[key].(*types.AttributeValueMemberS); ok {
+		return val.Value
+	}
+	return ""
+}
+
+func intAttr(item map[string]types.AttributeValue, key string) int64 {
+	if val, ok := item[key].(*types.AttributeValueMemberN); ok {
+		if parsed, err := strconv.ParseInt(val.Value, 10, 64); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func (s *server) loadRecommendations(ctx context.Context, clusterID string) (map[string]recommendationRollup, error) {
+	out, err := s.client.Query(ctx, &dynamodb.QueryInput{
+		TableName:              aws.String(s.table),
+		KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :sk_prefix)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":pk":        &types.AttributeValueMemberS{Value: "CLUSTER#" + clusterID},
+			":sk_prefix": &types.AttributeValueMemberS{Value: "REC#"},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	recs := make(map[string]recommendationRollup)
+	for _, item := range out.Items {
+		skVal := strAttr(item, "sk")
+		if !strings.HasPrefix(skVal, "REC#") {
+			continue
+		}
+		key := strings.TrimPrefix(skVal, "REC#")
+
+		firstSeenStr := strAttr(item, "first_seen_at")
+		lastSeenStr := strAttr(item, "last_seen_at")
+		var firstSeenAt, lastSeenAt time.Time
+		if t, err := time.Parse(time.RFC3339, firstSeenStr); err == nil {
+			firstSeenAt = t
+		}
+		if t, err := time.Parse(time.RFC3339, lastSeenStr); err == nil {
+			lastSeenAt = t
+		}
+
+		occurrences := intAttr(item, "occurrences")
+
+		var latest analyzer.Finding
+		if rawFinding, ok := item["latest_finding_json"].(*types.AttributeValueMemberS); ok {
+			_ = json.Unmarshal([]byte(rawFinding.Value), &latest)
+		}
+
+		recs[key] = recommendationRollup{
+			Key:          key,
+			RuleID:       strAttr(item, "rule_id"),
+			Severity:     strAttr(item, "severity"),
+			Namespace:    strAttr(item, "namespace"),
+			Workload:     strAttr(item, "workload"),
+			FirstSeenAt:  firstSeenAt,
+			LastSeenAt:   lastSeenAt,
+			Occurrences:  int(occurrences),
+			Latest:       latest,
+			ObservedDays: daysBetweenInclusive(firstSeenAt, lastSeenAt),
+		}
+	}
+	return recs, nil
+}
+
+func (s *server) rollups(ctx context.Context, reports []reportRecord) map[string]recommendationRollup {
 	rollups := map[string]recommendationRollup{}
 	latestKeys := map[string]bool{}
 	if len(reports) > 0 {
@@ -433,6 +522,35 @@ func (s *server) rollups(reports []reportRecord) map[string]recommendationRollup
 			rollups[key] = rollup
 		}
 	}
+
+	var clusterID string
+	if len(reports) > 0 {
+		clusterID = reports[0].ClusterID
+	}
+	if clusterID != "" {
+		if dbRecs, err := s.loadRecommendations(ctx, clusterID); err == nil && len(dbRecs) > 0 {
+			for key, dbRec := range dbRecs {
+				if rollup, exists := rollups[key]; exists {
+					if dbRec.FirstSeenAt.Before(rollup.FirstSeenAt) {
+						rollup.FirstSeenAt = dbRec.FirstSeenAt
+					}
+					if dbRec.LastSeenAt.After(rollup.LastSeenAt) {
+						rollup.LastSeenAt = dbRec.LastSeenAt
+						rollup.Latest = dbRec.Latest
+						rollup.Severity = dbRec.Severity
+					}
+					if dbRec.Occurrences > rollup.Occurrences {
+						rollup.Occurrences = dbRec.Occurrences
+					}
+					rollups[key] = rollup
+				} else if dbRec.LastSeenAt.Equal(reports[0].GeneratedAt) {
+					dbRec.Scope = findingScope(dbRec.Latest)
+					rollups[key] = dbRec
+				}
+			}
+		}
+	}
+
 	for key, rollup := range rollups {
 		rollup.ObservedDays = daysBetweenInclusive(rollup.FirstSeenAt, rollup.LastSeenAt)
 		rollup.LatestReportHas = latestKeys[key]
