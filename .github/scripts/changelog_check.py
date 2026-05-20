@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 CHANGELOG = "CHANGELOG.md"
+UNRELEASED_HEADING = "## Unreleased"
 
 
 def run_git(args: list[str], repo: Path) -> str:
@@ -37,6 +38,35 @@ def changed_files(repo: Path, base_ref: str) -> set[str]:
     raise RuntimeError(f"could not compare against {base_ref}: {last_error}")
 
 
+def read_file_at_ref(repo: Path, base_ref: str, filename: str) -> str:
+    candidates = [f"origin/{base_ref}:{filename}", f"{base_ref}:{filename}"]
+    last_error = ""
+    for revision in candidates:
+        try:
+            return run_git(["show", revision], repo)
+        except subprocess.CalledProcessError as exc:
+            last_error = exc.stderr.strip()
+    raise RuntimeError(f"could not read {filename} from {base_ref}: {last_error}")
+
+
+def unreleased_section(text: str) -> str | None:
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if line.strip() == UNRELEASED_HEADING:
+            start = index + 1
+            break
+    if start is None:
+        return None
+
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if lines[index].startswith("## "):
+            end = index
+            break
+    return "\n".join(line.rstrip() for line in lines[start:end]).strip()
+
+
 def validate_changelog(repo: Path) -> list[str]:
     errors: list[str] = []
     changelog = repo / CHANGELOG
@@ -47,8 +77,8 @@ def validate_changelog(repo: Path) -> list[str]:
     text = changelog.read_text(encoding="utf-8", errors="ignore")
     if not text.startswith("# Changelog"):
         errors.append(f"{CHANGELOG} must start with '# Changelog'")
-    if "## Unreleased" not in text:
-        errors.append(f"{CHANGELOG} must include a '## Unreleased' section")
+    if unreleased_section(text) is None:
+        errors.append(f"{CHANGELOG} must include a '{UNRELEASED_HEADING}' section")
     return errors
 
 
@@ -71,12 +101,21 @@ def check(repo: Path, base_ref: str | None, event_name: str | None) -> int:
     if CHANGELOG not in changed:
         print(
             f"ERROR: pull requests must update {CHANGELOG}. "
-            "Add an entry under '## Unreleased' describing the user-visible change.",
+            f"Add an entry under '{UNRELEASED_HEADING}' describing the user-visible change.",
             file=sys.stderr,
         )
         return 1
 
-    print(f"{CHANGELOG} was updated in this pull request.")
+    current_changelog = (repo / CHANGELOG).read_text(encoding="utf-8", errors="ignore")
+    base_changelog = read_file_at_ref(repo, base_ref, CHANGELOG)
+    if unreleased_section(current_changelog) == unreleased_section(base_changelog):
+        print(
+            f"ERROR: pull requests must update the '{UNRELEASED_HEADING}' section in {CHANGELOG}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"{CHANGELOG} '{UNRELEASED_HEADING}' section was updated in this pull request.")
     return 0
 
 
