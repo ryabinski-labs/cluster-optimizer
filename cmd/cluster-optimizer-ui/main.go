@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
-	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -747,8 +746,14 @@ func daysBetweenInclusive(start, end time.Time) int {
 	if end.Before(start) {
 		start, end = end, start
 	}
-	hours := end.Sub(start).Hours()
-	return int(math.Floor(hours/24)) + 1
+	startDate := utcDate(start)
+	endDate := utcDate(end)
+	return int(endDate.Sub(startDate).Hours()/24) + 1
+}
+
+func utcDate(value time.Time) time.Time {
+	year, month, day := value.UTC().Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 }
 
 func intFromSummary(summary map[string]any, key string) int64 {
