@@ -236,10 +236,15 @@ Supported first-pass remediations are intentionally narrow:
 - Runtime modernization planning for persistent rewrite candidates. This
   creates a coding-agent instructions file, not implementation code.
 
-Workloads must be mapped before the button can become available. Edit
-`config/remediation-targets.json` to point a Kubernetes workload at its
-application repository, manifest path, instructions path, and container name.
-When clicked, the UI dispatches either `.github/workflows/remediate-api-yml.yml`
+Workloads must be mapped before the button can become available. The file `config/remediation-targets.json` is ignored by Git to protect your private configuration and repository names. 
+
+To set up your mappings, copy the public-safe example configuration file to `config/remediation-targets.json`:
+
+```bash
+cp config/remediation-targets.example.json config/remediation-targets.json
+```
+
+Then edit `config/remediation-targets.json` to point a Kubernetes workload at its application repository, manifest path, instructions path, and container name. When clicked, the UI dispatches either `.github/workflows/remediate-api-yml.yml`
 for manifest changes or `.github/workflows/generate-rewrite-instructions.yml`
 for runtime modernization planning.
 

@@ -1,0 +1,19 @@
+{
+  "targets": [
+    {
+      "cluster_id": "default",
+      "namespace": "default",
+      "workload": "Deployment/your-app-api",
+      "repository": "YourGitHubUsername/your-app",
+      "manifest_path": "api.yml",
+      "instructions_path": "docs/cluster-optimizer/your-app-api-rewrite-instructions.md",
+      "container": "your-app-api",
+      "supported_rules": [
+        "memory-request-below-usage",
+        "cpu-request-over-provisioned",
+        "single-replica-pdb-blocks-drain",
+        "runtime-modernization-candidate"
+      ]
+    }
+  ]
+}
