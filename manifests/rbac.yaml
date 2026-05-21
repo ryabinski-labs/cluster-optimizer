@@ -15,7 +15,16 @@ metadata:
   name: cluster-optimizer-readonly
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "pods", "services", "persistentvolumes", "persistentvolumeclaims", "events"]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["services", "persistentvolumes", "persistentvolumeclaims", "events"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]

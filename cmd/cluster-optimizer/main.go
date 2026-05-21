@@ -6,10 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/GipsyChef/cluster-optimizer/internal/analyzer"
 	"github.com/GipsyChef/cluster-optimizer/internal/collector"
+	"github.com/GipsyChef/cluster-optimizer/internal/nudger"
 	"github.com/GipsyChef/cluster-optimizer/internal/store"
 )
 
@@ -24,10 +26,12 @@ func run(ctx context.Context, args []string) error {
 	var clusterID string
 	var output string
 	var timeout time.Duration
+	var nudge bool
 	flags := flag.NewFlagSet("cluster-optimizer", flag.ContinueOnError)
 	flags.StringVar(&clusterID, "cluster-id", envOr("CLUSTER_OPTIMIZER_CLUSTER_ID", "default"), "stable cluster identifier")
 	flags.StringVar(&output, "output", envOr("OUTPUT_FORMAT", "json"), "json or text")
 	flags.DurationVar(&timeout, "timeout", 25*time.Second, "collection timeout")
+	flags.BoolVar(&nudge, "nudge", envBoolOr("CLUSTER_OPTIMIZER_NUDGE", false), "actively nudge pods to run on fewer nodes")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -63,6 +67,17 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 	}
+
+	if nudge {
+		clientset, err := collector.GetClientset()
+		if err != nil {
+			return fmt.Errorf("failed to get kubernetes clientset for active nudging: %w", err)
+		}
+		if err := nudger.NudgePods(ctx, clientset); err != nil {
+			return fmt.Errorf("active nudging failed: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -71,6 +86,18 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envBoolOr(key string, fallback bool) bool {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
 }
 
 func renderText(report analyzer.Report) string {
