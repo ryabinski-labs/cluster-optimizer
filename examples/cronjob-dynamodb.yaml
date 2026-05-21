@@ -24,7 +24,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: optimizer
-              image: ghcr.io/gipsychef/cluster-optimizer:0.1.0
+              image: ghcr.io/gipsychef/cluster-optimizer:latest
               imagePullPolicy: IfNotPresent
               args: ["--output", "json"]
               env:
@@ -49,8 +49,8 @@ spec:
                       key: AWS_SECRET_ACCESS_KEY
               resources:
                 requests:
-                  cpu: 20m
-                  memory: 64Mi
+                  cpu: 1m
+                  memory: 1Mi
                 limits:
                   cpu: 100m
                   memory: 128Mi
