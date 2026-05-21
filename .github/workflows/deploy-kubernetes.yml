@@ -135,7 +135,9 @@ jobs:
             manifest="examples/cronjob-dynamodb.yaml"
           fi
 
-          kubectl set image -f "${manifest}" optimizer="${IMAGE_NAME}:${IMAGE_TAG}" --local -o yaml |
+          kubectl patch --local -f "${manifest}" --type=json \
+            -p "[{\"op\":\"replace\",\"path\":\"/spec/jobTemplate/spec/template/spec/containers/0/image\",\"value\":\"${IMAGE_NAME}:${IMAGE_TAG}\"}]" \
+            -o yaml |
             sed "s/value: \"default\"/value: \"${CLUSTER_ID}\"/" |
             sed "s/value: cluster-optimizer-reports/value: ${DYNAMODB_TABLE}/" |
             kubectl apply -f -
