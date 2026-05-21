@@ -289,49 +289,34 @@ function remediationRow(finding, rollup, remediation) {
 }
 
 async function dispatchRemediation(finding, button, status) {
-  const rollup = rollupMap().get(findingKey(finding));
-  if (rollup?.remediation?.action === "rewrite_plan") {
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Loading";
+  try {
     const clusterId = encodeURIComponent(state.data?.cluster_id || "default");
     const ruleId = encodeURIComponent(finding.rule_id);
     const namespace = encodeURIComponent(finding.namespace || "");
     const workload = encodeURIComponent(finding.workload || "");
-    window.location.href = `/api/remediations/download?cluster_id=${clusterId}&rule_id=${ruleId}&namespace=${namespace}&workload=${workload}`;
-    return;
-  }
+    const url = `/api/remediations/download?cluster_id=${clusterId}&rule_id=${ruleId}&namespace=${namespace}&workload=${workload}`;
 
-  const action = button.textContent || "Remediate";
-  showConfirm(
-    "Remediation Confirmation",
-    `Are you sure you want to run ${action} for ${scope(finding)}?`,
-    async () => {
-      button.disabled = true;
-      const original = button.textContent;
-      button.textContent = "Dispatching";
-      try {
-        const response = await fetch("/api/remediations", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({
-            cluster_id: state.data?.cluster_id || "default",
-            rule_id: finding.rule_id,
-            namespace: finding.namespace || "",
-            workload: finding.workload || "",
-            confirm: true
-          })
-        });
-        const payload = await response.json();
-        if (!response.ok) {
-          throw new Error(payload.error || payload.remediation?.reason || `Request failed with ${response.status}`);
-        }
-        status.innerHTML = `Workflow dispatched. <a href="${escapeHtml(payload.workflow_url)}" target="_blank" rel="noreferrer">Open Actions</a>`;
-        button.textContent = "Dispatched";
-      } catch (error) {
-        status.textContent = error.message;
-        button.textContent = original;
-        button.disabled = false;
-      }
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to load instructions: ${response.statusText}`);
     }
-  );
+    const markdown = await response.text();
+    const filename = `remediation-instructions-${finding.workload.toLowerCase().replaceAll("/", "-")}.md`;
+    
+    showInstructionsModal(
+      originalText === "Plan Rewrite" ? "Rewrite Modernization Instructions" : "Remediation Instructions",
+      markdown,
+      filename
+    );
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.textContent = originalText;
+    button.disabled = false;
+  }
 }
 
 function actionTitle(remediation) {
@@ -412,43 +397,64 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function showConfirm(title, message, onConfirm) {
+function showInstructionsModal(title, content, filename) {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
 
   const card = document.createElement("div");
-  card.className = "modal-card";
+  card.className = "modal-card instructions-modal";
 
   const h2 = document.createElement("h2");
   h2.textContent = title;
 
-  const p = document.createElement("p");
-  p.textContent = message;
+  const pre = document.createElement("pre");
+  pre.className = "instructions-preview";
+  pre.textContent = content;
 
   const actions = document.createElement("div");
   actions.className = "modal-actions";
 
-  const cancelBtn = document.createElement("button");
-  cancelBtn.type = "button";
-  cancelBtn.className = "modal-button cancel";
-  cancelBtn.textContent = "Cancel";
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "modal-button confirm";
+  copyBtn.textContent = "Copy to Clipboard";
 
-  const confirmBtn = document.createElement("button");
-  confirmBtn.type = "button";
-  confirmBtn.className = "modal-button confirm";
-  confirmBtn.textContent = "OK";
+  const downloadBtn = document.createElement("button");
+  downloadBtn.type = "button";
+  downloadBtn.className = "modal-button confirm";
+  downloadBtn.textContent = "Download Markdown";
 
-  cancelBtn.addEventListener("click", () => {
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "modal-button cancel";
+  closeBtn.textContent = "Close";
+
+  copyBtn.addEventListener("click", () => {
+    navigator.clipboard.writeText(content).then(() => {
+      const original = copyBtn.textContent;
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => {
+        copyBtn.textContent = original;
+      }, 2000);
+    });
+  });
+
+  downloadBtn.addEventListener("click", () => {
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8;" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.setAttribute("download", filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  });
+
+  closeBtn.addEventListener("click", () => {
     overlay.remove();
   });
 
-  confirmBtn.addEventListener("click", () => {
-    overlay.remove();
-    onConfirm();
-  });
-
-  actions.append(cancelBtn, confirmBtn);
-  card.append(h2, p, actions);
+  actions.append(copyBtn, downloadBtn, closeBtn);
+  card.append(h2, pre, actions);
   overlay.append(card);
   document.body.append(overlay);
 }

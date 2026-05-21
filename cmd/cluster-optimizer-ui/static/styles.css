@@ -806,3 +806,24 @@ dd {
   from { transform: scale(0.95); opacity: 0; }
   to { transform: scale(1); opacity: 1; }
 }
+
+.modal-card.instructions-modal {
+  max-width: 720px;
+  width: 90vw;
+}
+
+.instructions-preview {
+  height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #f5f2e9;
+  padding: 14px;
+  margin: 0 0 20px;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
