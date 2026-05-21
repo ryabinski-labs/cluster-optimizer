@@ -4,6 +4,7 @@ All notable changes to Cluster Optimizer will be documented in this file.
 
 ## Unreleased
 
+- Unified both rewrite and resource-remediation actions to display a beautifully-styled, local-first instructions preview modal with clipboard-copy and markdown-download capabilities.
 - Implemented direct browser markdown file downloads for rewrite modernization plans.
 - Replaced standard browser confirm popups with a beautiful, modern native in-app confirmation modal.
 - Fixed UI observed-day calculation by implementing paginated DynamoDB queries and stateful recommendation tracking to prevent sliding-window resets.
