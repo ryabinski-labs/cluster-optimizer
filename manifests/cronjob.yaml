@@ -24,7 +24,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: optimizer
-              image: ghcr.io/gipsychef/cluster-optimizer:0.1.0
+              image: ghcr.io/gipsychef/cluster-optimizer:latest
               imagePullPolicy: IfNotPresent
               args: ["--output", "json"]
               env:

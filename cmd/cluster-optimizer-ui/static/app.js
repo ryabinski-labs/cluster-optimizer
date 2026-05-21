@@ -16,9 +16,23 @@ const els = {
   metricFindings: document.querySelector("#metricFindings"),
   metricHigh: document.querySelector("#metricHigh"),
   metricMedium: document.querySelector("#metricMedium"),
-  metricTwoNode: document.querySelector("#metricTwoNode"),
+  metricNodeCount: document.querySelector("#metricNodeCount"),
   metricRequestedMem: document.querySelector("#metricRequestedMem"),
   metricObservedMem: document.querySelector("#metricObservedMem"),
+  overviewKicker: document.querySelector("#overviewKicker"),
+  overviewTitle: document.querySelector("#overviewTitle"),
+  overviewStatus: document.querySelector("#overviewStatus"),
+  overviewVerdict: document.querySelector("#overviewVerdict"),
+  overviewCpuHeadroom: document.querySelector("#overviewCpuHeadroom"),
+  overviewCpuBar: document.querySelector("#overviewCpuBar"),
+  overviewCpuTarget: document.querySelector("#overviewCpuTarget"),
+  overviewMemHeadroom: document.querySelector("#overviewMemHeadroom"),
+  overviewMemBar: document.querySelector("#overviewMemBar"),
+  overviewMemTarget: document.querySelector("#overviewMemTarget"),
+  overviewObservedRatio: document.querySelector("#overviewObservedRatio"),
+  overviewObservedBar: document.querySelector("#overviewObservedBar"),
+  overviewObservedDelta: document.querySelector("#overviewObservedDelta"),
+  overviewActions: document.querySelector("#overviewActions"),
   trendKicker: document.querySelector("#trendKicker"),
   trendDays: document.querySelector("#trendDays"),
   trendStable: document.querySelector("#trendStable"),
@@ -99,6 +113,7 @@ function render() {
   els.emptyPanel.classList.toggle("hidden", reports.length !== 0);
   renderTimeline(reports);
   renderSummary(report);
+  renderOptimizationOverview(report);
   renderTrends();
   renderFindings();
 }
@@ -127,7 +142,7 @@ function renderSummary(report) {
     els.metricFindings.textContent = "0";
     els.metricHigh.textContent = "0";
     els.metricMedium.textContent = "0";
-    els.metricTwoNode.textContent = "-";
+    els.metricNodeCount.textContent = "-";
     els.metricRequestedMem.textContent = "-";
     els.metricObservedMem.textContent = "-";
     return;
@@ -136,14 +151,133 @@ function renderSummary(report) {
   const summary = report.summary || {};
   const high = findings.filter((item) => item.severity === "high").length;
   const medium = findings.filter((item) => item.severity === "medium").length;
-  const twoNode = summary.two_node_estimate || {};
   els.generatedAt.textContent = formatTime(report.generated_at);
   els.metricFindings.textContent = String(findings.length);
   els.metricHigh.textContent = String(high);
   els.metricMedium.textContent = String(medium);
-  els.metricTwoNode.textContent = twoNode.feasible === true ? "Yes" : "No";
+  els.metricNodeCount.textContent = formatNumber(summary.node_count);
   els.metricRequestedMem.textContent = formatMiB(summary.requested_memory_mib);
   els.metricObservedMem.textContent = formatMiB(summary.observed_memory_mib);
+}
+
+function renderOptimizationOverview(report) {
+  if (!report) {
+    els.overviewKicker.textContent = "Optimization Overview";
+    els.overviewTitle.textContent = "Capacity Fit";
+    els.overviewStatus.textContent = "-";
+    els.overviewStatus.className = "overview-status";
+    setVerdict("No report selected", "-", "Load a report to evaluate node fit and optimization blockers.", "neutral");
+    setRail(els.overviewCpuHeadroom, els.overviewCpuBar, els.overviewCpuTarget, "-", 0, "-");
+    setRail(els.overviewMemHeadroom, els.overviewMemBar, els.overviewMemTarget, "-", 0, "-");
+    setRail(els.overviewObservedRatio, els.overviewObservedBar, els.overviewObservedDelta, "-", 0, "-");
+    els.overviewActions.replaceChildren();
+    return;
+  }
+
+  const summary = report.summary || {};
+  const twoNode = summary.two_node_estimate || {};
+  const currentNodes = Number(summary.node_count || 0);
+  const feasible = twoNode.feasible === true;
+  const alreadyAtTarget = currentNodes > 0 && currentNodes <= 2;
+  const requestedMem = Number(summary.requested_memory_mib || 0);
+  const observedMem = Number(summary.observed_memory_mib || 0);
+  const observedRatio = requestedMem > 0 ? observedMem / requestedMem : 0;
+  const memDelta = requestedMem - observedMem;
+
+  els.overviewKicker.textContent = `${formatNumber(currentNodes)} node${currentNodes === 1 ? "" : "s"} observed`;
+  els.overviewTitle.textContent = alreadyAtTarget ? "Running At Floor" : "Two-Node Fit";
+  els.overviewStatus.textContent = feasible || alreadyAtTarget ? "Fit viable" : "Blocked";
+  els.overviewStatus.className = `overview-status ${feasible || alreadyAtTarget ? "good" : "blocked"}`;
+
+  if (alreadyAtTarget) {
+    setVerdict("Operating at target", "2 nodes", "The cluster is already at the minimum configured node-pool size.", "good");
+  } else if (feasible) {
+    setVerdict("Scale-down candidate", "2 nodes", "Requested resources clear the CPU and memory headroom guardrails.", "good");
+  } else {
+    setVerdict("Scale-down blocked", "2 nodes", twoNode.reason || "Requested resources do not clear the two-node headroom guardrails.", "blocked");
+  }
+
+  setRail(
+    els.overviewCpuHeadroom,
+    els.overviewCpuBar,
+    els.overviewCpuTarget,
+    formatCPU(Number(twoNode.cpu_headroom_m || 0)),
+    ratio(Number(twoNode.cpu_headroom_m || 0), Number(twoNode.minimum_cpu_headroom_m || 0)),
+    `minimum ${formatCPU(Number(twoNode.minimum_cpu_headroom_m || 0))}`
+  );
+  setRail(
+    els.overviewMemHeadroom,
+    els.overviewMemBar,
+    els.overviewMemTarget,
+    formatMiB(twoNode.memory_headroom_mib),
+    ratio(Number(twoNode.memory_headroom_mib || 0), Number(twoNode.minimum_memory_headroom_mib || 0)),
+    `minimum ${formatMiB(twoNode.minimum_memory_headroom_mib)}`
+  );
+  setRail(
+    els.overviewObservedRatio,
+    els.overviewObservedBar,
+    els.overviewObservedDelta,
+    requestedMem > 0 ? `${Math.round(observedRatio * 100)}%` : "-",
+    Math.max(0, Math.min(1, observedRatio)),
+    memDelta > 0 ? `${formatMiB(memDelta)} requested above observed` : "observed usage meets request"
+  );
+  renderOverviewActions(report);
+}
+
+function setVerdict(label, value, detail, tone) {
+  els.overviewVerdict.className = `overview-verdict ${tone}`;
+  els.overviewVerdict.innerHTML = `
+    <span>${escapeHtml(label)}</span>
+    <strong>${escapeHtml(value)}</strong>
+    <p>${escapeHtml(detail)}</p>
+  `;
+}
+
+function setRail(valueEl, barEl, targetEl, value, progress, target) {
+  valueEl.textContent = value;
+  barEl.style.width = `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`;
+  targetEl.textContent = target;
+}
+
+function renderOverviewActions(report) {
+  els.overviewActions.replaceChildren();
+  const trend = state.data?.trend || {};
+  const window = trend.window || {};
+  const requiredDays = window.required_days || 3;
+  const rollups = trend.top_recommendations || [];
+  const currentRollups = rollups.filter((item) => item.latest_report_has);
+  const ready = currentRollups.filter((item) => item.remediation?.available);
+  const persistent = currentRollups.filter((item) => item.observed_days >= requiredDays);
+  const findings = report.findings || [];
+  const high = findings.filter((item) => item.severity === "high").length;
+  const top = currentRollups[0];
+
+  [
+    {
+      label: "Ready actions",
+      value: formatNumber(ready.length),
+      detail: ready.length ? `${ready[0].scope} can be remediated` : "No automated remediation is ready"
+    },
+    {
+      label: "Persistent blockers",
+      value: formatNumber(persistent.length),
+      detail: `${requiredDays} day persistence threshold`
+    },
+    {
+      label: high > 0 ? "High risk" : "Top blocker",
+      value: high > 0 ? formatNumber(high) : topSeverity(top),
+      detail: top ? `${top.scope} · ${top.rule_id}` : "No active blocker in the latest report"
+    }
+  ].forEach((item) => {
+    const row = document.createElement("article");
+    row.className = "overview-action";
+    row.innerHTML = `
+      <span>${escapeHtml(item.label)}</span>
+      <strong>${escapeHtml(item.value)}</strong>
+      <p>${escapeHtml(item.detail)}</p>
+    `;
+    els.overviewActions.append(row);
+  });
 }
 
 function renderFindings() {
@@ -382,6 +516,26 @@ function formatTime(value) {
 function formatMiB(value) {
   if (value === undefined || value === null) return "-";
   return `${Math.round(Number(value)).toLocaleString()}Mi`;
+}
+
+function formatCPU(value) {
+  if (value === undefined || value === null) return "-";
+  return `${Math.round(Number(value)).toLocaleString()}m`;
+}
+
+function formatNumber(value) {
+  if (value === undefined || value === null) return "-";
+  return Number(value).toLocaleString();
+}
+
+function ratio(value, minimum) {
+  if (!minimum) return 0;
+  return Math.max(0, value / minimum);
+}
+
+function topSeverity(rollup) {
+  if (!rollup?.severity) return "-";
+  return titleCase(rollup.severity);
 }
 
 function titleCase(value) {
