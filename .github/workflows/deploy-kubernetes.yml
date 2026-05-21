@@ -28,6 +28,11 @@ on:
         default: us-east-1
         required: true
         type: string
+      doks_cluster_id:
+        description: DigitalOcean Kubernetes cluster ID.
+        default: 7dc99f7c-e0b7-4402-81ae-0e9a1fedcd82
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -51,15 +56,25 @@ jobs:
       - name: Set up kubectl
         uses: azure/setup-kubectl@v5
 
+      - name: Validate DigitalOcean token secret
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+        run: |
+          test -n "${DIGITALOCEAN_ACCESS_TOKEN}" || {
+            echo "DIGITALOCEAN_ACCESS_TOKEN secret is required to deploy to Kubernetes."
+            exit 1
+          }
+
+      - name: Set up doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
       - name: Configure kubeconfig
         env:
-          KUBECONFIG_B64: ${{ secrets.DOKS_KUBECONFIG_B64 }}
+          DOKS_CLUSTER_ID: ${{ inputs.doks_cluster_id }}
         run: |
-          if [ -n "${KUBECONFIG_B64}" ]; then
-            mkdir -p "${HOME}/.kube"
-            echo "${KUBECONFIG_B64}" | base64 -d > "${HOME}/.kube/config"
-            chmod 600 "${HOME}/.kube/config"
-          fi
+          doctl kubernetes cluster kubeconfig save "${DOKS_CLUSTER_ID}" --expiry-seconds 600
           kubectl cluster-info
 
       - name: Apply read-only RBAC

@@ -61,10 +61,10 @@
             <span>Medium</span>
             <strong id="metricMedium">0</strong>
           </button>
-          <button class="metric blue" type="button" data-view="twonode">
-            <span>2 Nodes</span>
-            <strong id="metricTwoNode">-</strong>
-          </button>
+          <div class="metric blue">
+            <span>Nodes</span>
+            <strong id="metricNodeCount">-</strong>
+          </div>
           <div class="metric">
             <span>Requested Mem</span>
             <strong id="metricRequestedMem">-</strong>
@@ -72,6 +72,50 @@
           <div class="metric">
             <span>Observed Mem</span>
             <strong id="metricObservedMem">-</strong>
+          </div>
+        </section>
+
+        <section class="optimization-overview" aria-label="Optimization overview">
+          <header class="overview-head">
+            <div>
+              <p id="overviewKicker">Optimization Overview</p>
+              <h2 id="overviewTitle">Capacity Fit</h2>
+            </div>
+            <span id="overviewStatus" class="overview-status">-</span>
+          </header>
+          <div class="overview-grid">
+            <article id="overviewVerdict" class="overview-verdict">
+              <span>Current posture</span>
+              <strong>-</strong>
+              <p>-</p>
+            </article>
+            <div class="overview-rails" aria-label="Fit guardrails">
+              <div class="rail">
+                <header>
+                  <span>CPU headroom</span>
+                  <b id="overviewCpuHeadroom">-</b>
+                </header>
+                <i><em id="overviewCpuBar"></em></i>
+                <small id="overviewCpuTarget">-</small>
+              </div>
+              <div class="rail">
+                <header>
+                  <span>Memory headroom</span>
+                  <b id="overviewMemHeadroom">-</b>
+                </header>
+                <i><em id="overviewMemBar"></em></i>
+                <small id="overviewMemTarget">-</small>
+              </div>
+              <div class="rail">
+                <header>
+                  <span>Observed vs requested</span>
+                  <b id="overviewObservedRatio">-</b>
+                </header>
+                <i><em id="overviewObservedBar"></em></i>
+                <small id="overviewObservedDelta">-</small>
+              </div>
+            </div>
+            <div id="overviewActions" class="overview-actions" aria-label="Current optimization actions"></div>
           </div>
         </section>
 
