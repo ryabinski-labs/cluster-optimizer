@@ -24,6 +24,14 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+func GetClientset() (*kubernetes.Clientset, error) {
+	cfg, err := kubeConfig()
+	if err != nil {
+		return nil, err
+	}
+	return kubernetes.NewForConfig(cfg)
+}
+
 func Collect(ctx context.Context, clusterID string) (model.Snapshot, error) {
 	cfg, err := kubeConfig()
 	if err != nil {
