@@ -255,6 +255,10 @@ Supported first-pass remediations are intentionally narrow:
 - CPU request tuning in `api.yml`.
 - Memory request tuning in `api.yml`.
 - Single-replica PDB drain fixes in `api.yml`.
+- HPA scale-up and scale-down stabilization tuning in `api.yml` for
+  percentage-based CPU autoscalers whose low requests are sensitive to request
+  tuning. The patch only raises stabilization windows; it does not change the
+  CPU target or request.
 - Runtime modernization planning for persistent rewrite candidates. This
   creates a coding-agent instructions file, not implementation code.
 
@@ -309,6 +313,8 @@ Implemented checks:
 - PDBs that allow all replicas to be disrupted.
 - HPAs where `minReplicas == maxReplicas`.
 - CPU HPAs with missing CPU requests.
+- Percentage-based CPU HPAs whose low per-replica requests make scale-up
+  sensitive to request tuning.
 - DaemonSet per-node overhead.
 - cert-manager HTTP-01 solver hygiene.
 - Two-node feasibility estimate for current node shape.

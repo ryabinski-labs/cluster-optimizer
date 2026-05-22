@@ -12,6 +12,7 @@
         "memory-request-below-usage",
         "cpu-request-over-provisioned",
         "single-replica-pdb-blocks-drain",
+        "cpu-hpa-low-request-sensitive",
         "runtime-modernization-candidate"
       ]
     }
