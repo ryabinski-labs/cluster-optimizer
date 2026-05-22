@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -81,6 +82,93 @@ func TestSkipsCPURecommendationWhenCPUMetricsMissing(t *testing.T) {
 			t.Fatalf("unexpected cpu finding: %#v", finding)
 		}
 	}
+}
+
+func TestDetectsLowRequestCPUHPASensitivity(t *testing.T) {
+	target := int32(70)
+	snapshot := model.Snapshot{
+		ClusterID:  "test",
+		CapturedAt: time.Now(),
+		Nodes: []model.Node{
+			{Name: "n1", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+			{Name: "n2", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+		},
+		Workloads: []model.Workload{{
+			Namespace: "default", Name: "api", Kind: "Deployment", Replicas: 1,
+			Labels: map[string]string{"app": "api"}, Selector: map[string]string{"app": "api"},
+			RequestsCPUm: 50, RequestsMemoryMiB: 256,
+		}},
+		HPAs: []model.HPA{{
+			Namespace: "default", Name: "api-hpa", TargetKind: "Deployment", TargetName: "api",
+			MinReplicas: 1, MaxReplicas: 3, Metrics: []string{"cpu"}, CPUUtilizationTarget: &target,
+		}},
+	}
+
+	report := Analyze(snapshot)
+	for _, finding := range report.Findings {
+		if finding.RuleID == "cpu-hpa-low-request-sensitive" {
+			return
+		}
+	}
+	t.Fatalf("hpa sensitivity finding missing: %#v", report.Findings)
+}
+
+func TestSkipsLowRequestCPUHPASensitivityForAverageValueTarget(t *testing.T) {
+	averageValue := int64(100)
+	snapshot := model.Snapshot{
+		ClusterID:  "test",
+		CapturedAt: time.Now(),
+		Nodes: []model.Node{
+			{Name: "n1", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+			{Name: "n2", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+		},
+		Workloads: []model.Workload{{
+			Namespace: "default", Name: "api", Kind: "Deployment", Replicas: 1,
+			Labels: map[string]string{"app": "api"}, Selector: map[string]string{"app": "api"},
+			RequestsCPUm: 50, RequestsMemoryMiB: 256,
+		}},
+		HPAs: []model.HPA{{
+			Namespace: "default", Name: "api-hpa", TargetKind: "Deployment", TargetName: "api",
+			MinReplicas: 1, MaxReplicas: 3, Metrics: []string{"cpu"}, CPUAverageValueTargetm: &averageValue,
+		}},
+	}
+
+	report := Analyze(snapshot)
+	for _, finding := range report.Findings {
+		if finding.RuleID == "cpu-hpa-low-request-sensitive" {
+			t.Fatalf("unexpected hpa sensitivity finding: %#v", finding)
+		}
+	}
+}
+
+func TestCPURequestRecommendationMentionsHPARetuning(t *testing.T) {
+	cpu := int64(20)
+	target := int32(70)
+	snapshot := model.Snapshot{
+		ClusterID:  "test",
+		CapturedAt: time.Now(),
+		Nodes: []model.Node{
+			{Name: "n1", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+			{Name: "n2", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+		},
+		Workloads: []model.Workload{{
+			Namespace: "default", Name: "api", Kind: "Deployment", Replicas: 1,
+			Labels: map[string]string{"app": "api"}, Selector: map[string]string{"app": "api"},
+			RequestsCPUm: 250, RequestsMemoryMiB: 256, UsageCPUm: &cpu,
+		}},
+		HPAs: []model.HPA{{
+			Namespace: "default", Name: "api-hpa", TargetKind: "Deployment", TargetName: "api",
+			MinReplicas: 1, MaxReplicas: 3, Metrics: []string{"cpu"}, CPUUtilizationTarget: &target,
+		}},
+	}
+
+	report := Analyze(snapshot)
+	for _, finding := range report.Findings {
+		if finding.RuleID == "cpu-request-over-provisioned" && strings.Contains(finding.Recommendation, "HPA retuning") {
+			return
+		}
+	}
+	t.Fatalf("hpa-aware cpu recommendation missing: %#v", report.Findings)
 }
 
 func TestDetectsRuntimeModernizationCandidate(t *testing.T) {
