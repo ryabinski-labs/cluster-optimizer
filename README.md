@@ -222,6 +222,27 @@ Run order:
 3. `Deploy AWS Infra`
 4. `Deploy Kubernetes`
 
+For normal Kubernetes deploys from a local shell, prefer the wrapper script
+over direct `kubectl apply`. It triggers the same GitHub Actions workflow and
+requires an immutable image tag:
+
+```bash
+./scripts/deploy-kubernetes.sh <published-image-tag> --wait
+```
+
+Verify the live CronJob is pinned to that image:
+
+```bash
+./scripts/verify-deployment.sh <published-image-tag>
+```
+
+To prove the deployed image can execute in-cluster, create a one-off Job from
+the deployed CronJob:
+
+```bash
+./scripts/verify-deployment.sh <published-image-tag> --run-job
+```
+
 ## Remediation Workflow
 
 Remediation remains opt-in. The local UI shows recurring recommendation trends,
