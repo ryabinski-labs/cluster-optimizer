@@ -52,13 +52,17 @@ type PDB struct {
 }
 
 type HPA struct {
-	Namespace   string   `json:"namespace"`
-	Name        string   `json:"name"`
-	TargetKind  string   `json:"target_kind"`
-	TargetName  string   `json:"target_name"`
-	MinReplicas int32    `json:"min_replicas"`
-	MaxReplicas int32    `json:"max_replicas"`
-	Metrics     []string `json:"metrics"`
+	Namespace                     string   `json:"namespace"`
+	Name                          string   `json:"name"`
+	TargetKind                    string   `json:"target_kind"`
+	TargetName                    string   `json:"target_name"`
+	MinReplicas                   int32    `json:"min_replicas"`
+	MaxReplicas                   int32    `json:"max_replicas"`
+	Metrics                       []string `json:"metrics"`
+	CPUUtilizationTarget          *int32   `json:"cpu_utilization_target,omitempty"`
+	CPUAverageValueTargetm        *int64   `json:"cpu_average_value_target_m,omitempty"`
+	ScaleUpStabilizationSeconds   *int32   `json:"scale_up_stabilization_seconds,omitempty"`
+	ScaleDownStabilizationSeconds *int32   `json:"scale_down_stabilization_seconds,omitempty"`
 }
 
 type Snapshot struct {

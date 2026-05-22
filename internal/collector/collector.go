@@ -235,13 +235,17 @@ func collectHPAs(ctx context.Context, clientset *kubernetes.Clientset) ([]model.
 	result := make([]model.HPA, 0, len(hpas.Items))
 	for _, hpa := range hpas.Items {
 		result = append(result, model.HPA{
-			Namespace:   hpa.Namespace,
-			Name:        hpa.Name,
-			TargetKind:  hpa.Spec.ScaleTargetRef.Kind,
-			TargetName:  hpa.Spec.ScaleTargetRef.Name,
-			MinReplicas: minReplicas(hpa),
-			MaxReplicas: hpa.Spec.MaxReplicas,
-			Metrics:     hpaMetrics(hpa.Spec.Metrics),
+			Namespace:                     hpa.Namespace,
+			Name:                          hpa.Name,
+			TargetKind:                    hpa.Spec.ScaleTargetRef.Kind,
+			TargetName:                    hpa.Spec.ScaleTargetRef.Name,
+			MinReplicas:                   minReplicas(hpa),
+			MaxReplicas:                   hpa.Spec.MaxReplicas,
+			Metrics:                       hpaMetrics(hpa.Spec.Metrics),
+			CPUUtilizationTarget:          hpaCPUUtilizationTarget(hpa.Spec.Metrics),
+			CPUAverageValueTargetm:        hpaCPUAverageValueTargetm(hpa.Spec.Metrics),
+			ScaleUpStabilizationSeconds:   hpaStabilizationSeconds(hpa.Spec.Behavior, true),
+			ScaleDownStabilizationSeconds: hpaStabilizationSeconds(hpa.Spec.Behavior, false),
 		})
 	}
 	return result, nil
@@ -400,6 +404,49 @@ func hpaMetrics(metrics []autoscalingv2.MetricSpec) []string {
 		result = append(result, strings.ToLower(string(metric.Type)))
 	}
 	return result
+}
+
+func hpaCPUUtilizationTarget(metrics []autoscalingv2.MetricSpec) *int32 {
+	for _, metric := range metrics {
+		if metric.Type != autoscalingv2.ResourceMetricSourceType || metric.Resource == nil || metric.Resource.Name != corev1.ResourceCPU {
+			continue
+		}
+		if metric.Resource.Target.AverageUtilization != nil {
+			value := *metric.Resource.Target.AverageUtilization
+			return &value
+		}
+	}
+	return nil
+}
+
+func hpaCPUAverageValueTargetm(metrics []autoscalingv2.MetricSpec) *int64 {
+	for _, metric := range metrics {
+		if metric.Type != autoscalingv2.ResourceMetricSourceType || metric.Resource == nil || metric.Resource.Name != corev1.ResourceCPU {
+			continue
+		}
+		if metric.Resource.Target.AverageValue != nil {
+			value := metric.Resource.Target.AverageValue.MilliValue()
+			return &value
+		}
+	}
+	return nil
+}
+
+func hpaStabilizationSeconds(behavior *autoscalingv2.HorizontalPodAutoscalerBehavior, scaleUp bool) *int32 {
+	if behavior == nil {
+		return nil
+	}
+	var rules *autoscalingv2.HPAScalingRules
+	if scaleUp {
+		rules = behavior.ScaleUp
+	} else {
+		rules = behavior.ScaleDown
+	}
+	if rules == nil || rules.StabilizationWindowSeconds == nil {
+		return nil
+	}
+	value := *rules.StabilizationWindowSeconds
+	return &value
 }
 
 func normalizeReplicaSet(name string) string {

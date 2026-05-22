@@ -35,7 +35,8 @@ type Report struct {
 func Analyze(snapshot model.Snapshot) Report {
 	findings := append([]Finding{}, analyzePDBs(snapshot.Workloads, snapshot.PDBs)...)
 	findings = append(findings, analyzeHPAs(snapshot.Workloads, snapshot.HPAs)...)
-	findings = append(findings, analyzeUsage(snapshot.Workloads)...)
+	findings = append(findings, analyzeHPASensitivity(snapshot.Workloads, snapshot.HPAs)...)
+	findings = append(findings, analyzeUsage(snapshot.Workloads, snapshot.HPAs)...)
 	findings = append(findings, analyzeScaling(snapshot.Workloads, snapshot.HPAs)...)
 	findings = append(findings, analyzeRuntimeModernization(snapshot.Workloads)...)
 	findings = append(findings, analyzeDaemonSetOverhead(snapshot)...)
@@ -139,7 +140,7 @@ func twoNodeEstimate(snapshot model.Snapshot, reqCPU, reqMem, dsCPU, dsMem int64
 	}
 }
 
-func analyzeUsage(workloads []model.Workload) []Finding {
+func analyzeUsage(workloads []model.Workload, hpas []model.HPA) []Finding {
 	var findings []Finding
 	for _, workload := range workloads {
 		if workload.UsageMemoryMiB != nil {
@@ -162,13 +163,51 @@ func analyzeUsage(workloads []model.Workload) []Finding {
 		if workload.UsageCPUm != nil {
 			usageCPU := *workload.UsageCPUm
 			if usageCPU > 0 && workload.RequestsCPUm > 0 && usageCPU < workload.RequestsCPUm/5 && workload.RequestsCPUm-usageCPU > 100 {
+				recommendation := "Lower CPU request after checking latency and throttling metrics."
+				if hpa := cpuUtilizationHPAForWorkload(workload, hpas); hpa != nil {
+					recommendation = "Lower CPU request only with matching HPA retuning; preserve the intended scale-up point with an absolute averageValue target or a higher CPU request, then validate latency and throttling metrics."
+				}
 				findings = append(findings, finding("cpu-request-over-provisioned", "medium", workload,
 					fmt.Sprintf("Observed CPU %s is materially below request %s.", quantity.FormatCPU(usageCPU), quantity.FormatCPU(workload.RequestsCPUm)),
-					"Lower CPU request after checking latency and throttling metrics.",
+					recommendation,
 					"Improves schedulable CPU headroom and HPA sensitivity.",
 					"Low/medium: CPU is compressible, but latency-sensitive paths need throttling checks.", "low"))
 			}
 		}
+	}
+	return findings
+}
+
+func analyzeHPASensitivity(workloads []model.Workload, hpas []model.HPA) []Finding {
+	byKey := map[string]model.Workload{}
+	for _, workload := range workloads {
+		byKey[workloadKey(workload)] = workload
+	}
+	var findings []Finding
+	for _, hpa := range hpas {
+		if hpa.CPUUtilizationTarget == nil || hpa.CPUAverageValueTargetm != nil || hpa.MaxReplicas <= hpa.MinReplicas {
+			continue
+		}
+		workload := byKey[hpa.Namespace+"/"+hpa.TargetKind+"/"+hpa.TargetName]
+		if workload.Name == "" || workload.Replicas <= 0 || workload.RequestsCPUm <= 0 {
+			continue
+		}
+		perReplicaRequest := workload.RequestsCPUm / int64(workload.Replicas)
+		scaleThreshold := perReplicaRequest * int64(*hpa.CPUUtilizationTarget) / 100
+		if scaleThreshold >= 100 && hasScaleUpStabilization(hpa, 60) {
+			continue
+		}
+		evidence := fmt.Sprintf("HPA %s targets %d%% CPU on %s per-replica request, so scale-up can start around %s CPU per pod.",
+			hpa.Name, *hpa.CPUUtilizationTarget, quantity.FormatCPU(perReplicaRequest), quantity.FormatCPU(scaleThreshold))
+		if hpa.ScaleUpStabilizationSeconds == nil {
+			evidence += " No scale-up stabilization window is configured."
+		} else {
+			evidence += fmt.Sprintf(" Scale-up stabilization is %ds.", *hpa.ScaleUpStabilizationSeconds)
+		}
+		findings = append(findings, finding("cpu-hpa-low-request-sensitive", "medium", workload, evidence,
+			"Use an absolute CPU averageValue target or raise the CPU request so the scale-up point reflects sustained load; add HPA scale-up and scale-down stabilization before lowering requests further.",
+			"Prevents request tuning from causing replica churn or avoidable node scale-ups.",
+			"Medium: HPA changes alter burst handling and must be checked against latency/error SLOs.", "medium"))
 	}
 	return findings
 }
@@ -413,6 +452,21 @@ func availabilityCount(value string, replicas int32) *int32 {
 	}
 	result := int32(n)
 	return &result
+}
+
+func cpuUtilizationHPAForWorkload(workload model.Workload, hpas []model.HPA) *model.HPA {
+	key := workloadKey(workload)
+	for i := range hpas {
+		hpa := &hpas[i]
+		if hpa.Namespace+"/"+hpa.TargetKind+"/"+hpa.TargetName == key && hpa.CPUUtilizationTarget != nil {
+			return hpa
+		}
+	}
+	return nil
+}
+
+func hasScaleUpStabilization(hpa model.HPA, minimumSeconds int32) bool {
+	return hpa.ScaleUpStabilizationSeconds != nil && *hpa.ScaleUpStabilizationSeconds >= minimumSeconds
 }
 
 func contains(values []string, wanted string) bool {
