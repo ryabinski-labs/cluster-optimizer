@@ -4,6 +4,7 @@ All notable changes to Cluster Optimizer will be documented in this file.
 
 ## Unreleased
 
+- Added local deployment helper scripts that trigger the CI/CD deploy workflow and verify the live CronJob image tag.
 - Added HPA sensitivity analysis for percentage-based CPU autoscalers whose low CPU requests can cause replica churn after request tuning.
 - Replaced remediation persistence fractions such as `4/3 days` with clearer review-readiness labels in the UI.
 - Added active pod-nudging capabilities to safely pack and consolidate cluster workloads onto as few nodes as possible.
