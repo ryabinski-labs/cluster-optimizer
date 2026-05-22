@@ -31,3 +31,18 @@ func TestDaysBetweenInclusiveSwapsReversedInputs(t *testing.T) {
 		t.Fatalf("daysBetweenInclusive() = %d, want 2", got)
 	}
 }
+
+func TestRuleCanPatchAPIYAMLCoversHPASensitivity(t *testing.T) {
+	if !ruleCanPatchAPIYAML("cpu-hpa-low-request-sensitive") {
+		t.Fatal("cpu-hpa-low-request-sensitive should be patchable as an api.yml change")
+	}
+	if ruleCanPatchAPIYAML("fixed-replica-capacity-without-autoscaler") {
+		t.Fatal("fixed-replica-capacity-without-autoscaler is not an api.yml patch rule")
+	}
+}
+
+func TestNeedsResourceTargetExcludesHPASensitivity(t *testing.T) {
+	if needsResourceTarget("cpu-hpa-low-request-sensitive") {
+		t.Fatal("cpu-hpa-low-request-sensitive must not require a CPU/memory request target")
+	}
+}

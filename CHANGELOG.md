@@ -4,6 +4,7 @@ All notable changes to Cluster Optimizer will be documented in this file.
 
 ## Unreleased
 
+- Added an `api.yml` remediation for the `cpu-hpa-low-request-sensitive` rule that adds or raises HPA scale-up and scale-down stabilization windows, reusing the existing remediator, workflow, UI, and remediation-target interfaces.
 - Updated local Kubernetes deployment and verification scripts to resolve the latest successfully published image tag when no explicit tag is provided.
 - Added local deployment helper scripts that trigger the CI/CD deploy workflow and verify the live CronJob image tag.
 - Added HPA sensitivity analysis for percentage-based CPU autoscalers whose low CPU requests can cause replica churn after request tuning.
