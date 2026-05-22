@@ -391,19 +391,52 @@ function renderRollups(rollups, requiredDays) {
   rollups.slice(0, 8).forEach((rollup) => {
     const row = document.createElement("article");
     row.className = `rollup ${rollup.severity || "low"}${rollup.latest_report_has ? "" : " resolved"}`;
-    const progress = Math.min(100, Math.round(((rollup.observed_days || 0) / requiredDays) * 100));
+    const progress = rollupProgress(rollup, requiredDays);
+    const statusLabel = rollupStatusLabel(rollup, requiredDays);
+    const progressTitle = rollupProgressTitle(rollup, requiredDays);
     row.innerHTML = `
       <div>
         <strong>${escapeHtml(rollup.scope)}</strong>
         <span>${escapeHtml(rollup.rule_id)} · ${rollup.occurrences} report${rollup.occurrences === 1 ? "" : "s"}</span>
       </div>
-      <div class="rollup-progress" title="${rollup.observed_days} observed day(s)">
+      <div class="rollup-progress" title="${escapeHtml(progressTitle)}">
         <i style="width:${progress}%"></i>
       </div>
-      <em>${rollup.latest_report_has ? `${rollup.observed_days}/${requiredDays} days` : "resolved"}</em>
+      <em>${escapeHtml(statusLabel)}</em>
     `;
     els.rollupList.append(row);
   });
+}
+
+function rollupProgress(rollup, requiredDays) {
+  const required = Math.max(1, Number(requiredDays) || 1);
+  const observed = Math.max(0, Number(rollup.observed_days) || 0);
+  return Math.min(100, Math.round((observed / required) * 100));
+}
+
+function rollupStatusLabel(rollup, requiredDays) {
+  if (!rollup.latest_report_has) {
+    return "Resolved";
+  }
+  const required = Math.max(1, Number(requiredDays) || 1);
+  const observed = Math.max(0, Number(rollup.observed_days) || 0);
+  if (observed >= required) {
+    return "Ready for review";
+  }
+  const remaining = required - observed;
+  return `${remaining} day${remaining === 1 ? "" : "s"} left`;
+}
+
+function rollupProgressTitle(rollup, requiredDays) {
+  if (!rollup.latest_report_has) {
+    return "Resolved; this recommendation no longer appears in the latest report.";
+  }
+  const required = Math.max(1, Number(requiredDays) || 1);
+  const observed = Math.max(0, Number(rollup.observed_days) || 0);
+  if (observed >= required) {
+    return `Observed for ${observed} day${observed === 1 ? "" : "s"}; ${required}-day review threshold met.`;
+  }
+  return `Observed for ${observed} of ${required} required day${required === 1 ? "" : "s"}.`;
 }
 
 function remediationRow(finding, rollup, remediation) {
