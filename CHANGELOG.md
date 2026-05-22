@@ -4,6 +4,7 @@ All notable changes to Cluster Optimizer will be documented in this file.
 
 ## Unreleased
 
+- Updated local Kubernetes deployment and verification scripts to resolve the latest successfully published image tag when no explicit tag is provided.
 - Added local deployment helper scripts that trigger the CI/CD deploy workflow and verify the live CronJob image tag.
 - Added HPA sensitivity analysis for percentage-based CPU autoscalers whose low CPU requests can cause replica churn after request tuning.
 - Replaced remediation persistence fractions such as `4/3 days` with clearer review-readiness labels in the UI.
