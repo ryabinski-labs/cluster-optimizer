@@ -223,24 +223,25 @@ Run order:
 4. `Deploy Kubernetes`
 
 For normal Kubernetes deploys from a local shell, prefer the wrapper script
-over direct `kubectl apply`. It triggers the same GitHub Actions workflow and
-requires an immutable image tag:
+over direct `kubectl apply`. It triggers the same GitHub Actions workflow. By
+default it deploys the latest successful image built by the `Publish Image`
+workflow on `main`:
+
+```bash
+./scripts/deploy-kubernetes.sh --wait
+```
+
+For rollbacks or exact deploys, pass an immutable image tag explicitly:
 
 ```bash
 ./scripts/deploy-kubernetes.sh <published-image-tag> --wait
 ```
 
-Verify the live CronJob is pinned to that image:
+Verify the live CronJob is pinned to the latest published image and can execute
+in-cluster:
 
 ```bash
-./scripts/verify-deployment.sh <published-image-tag>
-```
-
-To prove the deployed image can execute in-cluster, create a one-off Job from
-the deployed CronJob:
-
-```bash
-./scripts/verify-deployment.sh <published-image-tag> --run-job
+./scripts/verify-deployment.sh --run-job
 ```
 
 ## Remediation Workflow

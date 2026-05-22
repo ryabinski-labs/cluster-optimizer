@@ -3,11 +3,13 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy-kubernetes.sh <image-tag> [--wait]
+Usage: scripts/deploy-kubernetes.sh [image-tag] [--wait]
 
 Triggers the existing GitHub Actions Kubernetes deploy workflow with an
-immutable image tag. This keeps deployment in CI/CD while making the correct
-workflow inputs easy to repeat from a local shell.
+immutable image tag. When no image tag is provided, the script deploys the
+latest successful image built by the Publish Image workflow on GITHUB_REF.
+This keeps deployment in CI/CD while making the correct workflow inputs easy
+to repeat from a local shell.
 
 Environment overrides:
   GITHUB_REF          Git ref to deploy from. Default: main
@@ -19,6 +21,7 @@ Environment overrides:
                       Default: 7dc99f7c-e0b7-4402-81ae-0e9a1fedcd82
 
 Examples:
+  scripts/deploy-kubernetes.sh --wait
   scripts/deploy-kubernetes.sh 2feb71995ad285b48d33b17f9b193a012dc2db24
   scripts/deploy-kubernetes.sh 2feb71995ad285b48d33b17f9b193a012dc2db24 --wait
 EOF
@@ -29,6 +32,16 @@ require_command() {
     echo "error: required command '$1' was not found" >&2
     exit 127
   fi
+}
+
+latest_published_image_tag() {
+  gh run list \
+    --workflow "Publish Image" \
+    --branch "${GITHUB_REF}" \
+    --status completed \
+    --limit 20 \
+    --json conclusion,headSha \
+    --jq 'map(select(.conclusion == "success"))[0].headSha // ""'
 }
 
 IMAGE_TAG=""
@@ -61,17 +74,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ -z "${IMAGE_TAG}" ]; then
-  echo "error: image tag is required" >&2
-  usage >&2
-  exit 2
-fi
-
-if [ "${IMAGE_TAG}" = "latest" ]; then
-  echo "error: refuse to deploy mutable tag 'latest'; pass a commit SHA or release tag" >&2
-  exit 2
-fi
-
 require_command gh
 
 GITHUB_REF="${GITHUB_REF:-main}"
@@ -88,6 +90,21 @@ case "${ENABLE_DYNAMODB}" in
     exit 2
     ;;
 esac
+
+if [ -z "${IMAGE_TAG}" ]; then
+  echo "Resolving latest successful published image tag on ${GITHUB_REF}..."
+  IMAGE_TAG="$(latest_published_image_tag)"
+fi
+
+if [ -z "${IMAGE_TAG}" ]; then
+  echo "error: no successful Publish Image run found for ${GITHUB_REF}" >&2
+  exit 1
+fi
+
+if [ "${IMAGE_TAG}" = "latest" ]; then
+  echo "error: refuse to deploy mutable tag 'latest'; pass a commit SHA or release tag" >&2
+  exit 2
+fi
 
 echo "Triggering Deploy Kubernetes for image tag ${IMAGE_TAG}..."
 gh workflow run deploy-kubernetes.yml \
