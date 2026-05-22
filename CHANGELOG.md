@@ -5,6 +5,7 @@ All notable changes to Cluster Optimizer will be documented in this file.
 ## Unreleased
 
 - Added HPA sensitivity analysis for percentage-based CPU autoscalers whose low CPU requests can cause replica churn after request tuning.
+- Replaced remediation persistence fractions such as `4/3 days` with clearer review-readiness labels in the UI.
 - Added active pod-nudging capabilities to safely pack and consolidate cluster workloads onto as few nodes as possible.
 - Added a local UI optimization overview for node-fit posture, headroom guardrails, observed/requested memory, and ready actions.
 - Added a `--nudge` CLI flag and `CLUSTER_OPTIMIZER_NUDGE` environment variable to trigger active consolidation.
