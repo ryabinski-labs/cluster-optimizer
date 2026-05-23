@@ -4,6 +4,7 @@ All notable changes to Cluster Optimizer will be documented in this file.
 
 ## Unreleased
 
+- Clarified `scripts/verify-deployment.sh` output so it directly answers whether the latest published or requested image is deployed.
 - Added `provider_managed` and `remediable` fields to every analyzer finding so remediators can refuse to touch DOKS-reconciled DaemonSets (kube-proxy, cilium, csi-do-node, do-node-agent, doks-telemetry-config-reloader, konnectivity-agent, hubble-relay/ui, coredns, metrics-server, cpc-bridge-proxy) and so callers can tell at a glance which findings have a remediation target configured.
 - Added DaemonSet and StatefulSet support to `api-yml-remediator` for `memory-request-over-provisioned` and `cpu-request-over-provisioned` rules, with an explicit refusal to patch provider-managed workload names.
 - Added a `plan` package that turns findings into an auditable list of `PlannedAction`s with safety defaults (confidence=high, ≥3 occurrences, 50% max trim per pass, 10m/32Mi floors, 1 action per run), and skips with a recorded reason when any gate fails.
