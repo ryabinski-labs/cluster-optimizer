@@ -5,11 +5,10 @@ usage() {
   cat <<'EOF'
 Usage: scripts/verify-deployment.sh [image-tag] [--run-job]
 
-Verifies that the live cluster-optimizer CronJob is pinned to the expected
-image tag. When no image tag is provided, the script expects the latest
-successful image built by the Publish Image workflow on GITHUB_REF. With
---run-job, it also creates a one-off Job from the CronJob and waits for it to
-complete.
+Answers whether the live cluster-optimizer CronJob is running the latest
+successfully published image for GITHUB_REF. When an image tag is provided, it
+answers whether that specific image is deployed instead. With --run-job, it
+also creates a one-off Job from the CronJob and waits for it to complete.
 
 Environment overrides:
   GITHUB_REF     Git ref used to resolve the latest published image. Default: main
@@ -44,6 +43,7 @@ latest_published_image_tag() {
 }
 
 IMAGE_TAG=""
+EXPECTING_LATEST=true
 RUN_JOB=false
 
 while [ "$#" -gt 0 ]; do
@@ -68,6 +68,7 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       IMAGE_TAG="$1"
+      EXPECTING_LATEST=false
       shift
       ;;
   esac
@@ -83,8 +84,11 @@ IMAGE_NAME="${IMAGE_NAME:-ghcr.io/gipsychef/cluster-optimizer}"
 VERIFY_JOB="${VERIFY_JOB:-cluster-optimizer-deploy-verify}"
 
 if [ -z "${IMAGE_TAG}" ]; then
-  echo "Resolving latest successful published image tag on ${GITHUB_REF}..."
+  echo "Checking whether the latest published version is deployed..."
+  echo "Finding the newest successfully published image for ${GITHUB_REF}..."
   IMAGE_TAG="$(latest_published_image_tag)"
+else
+  echo "Checking whether the requested image is deployed..."
 fi
 
 if [ -z "${IMAGE_TAG}" ]; then
@@ -104,16 +108,29 @@ pull_policy="$(kubectl get cronjob "${CRONJOB}" -n "${NAMESPACE}" -o jsonpath='{
 last_success="$(kubectl get cronjob "${CRONJOB}" -n "${NAMESPACE}" -o jsonpath='{.status.lastSuccessfulTime}')"
 
 echo "CronJob: ${NAMESPACE}/${CRONJOB}"
-echo "Image: ${actual_image}"
+if [ "${EXPECTING_LATEST}" = "true" ]; then
+  echo "Latest published image: ${EXPECTED_IMAGE}"
+else
+  echo "Expected image: ${EXPECTED_IMAGE}"
+fi
+echo "Currently deployed image: ${actual_image}"
 echo "Pull policy: ${pull_policy:-<unset>}"
 echo "Last successful schedule: ${last_success:-<none>}"
 
 if [ "${actual_image}" != "${EXPECTED_IMAGE}" ]; then
-  echo "error: expected image ${EXPECTED_IMAGE}, got ${actual_image}" >&2
+  if [ "${EXPECTING_LATEST}" = "true" ]; then
+    echo "Result: NO - the latest published version is not deployed." >&2
+  else
+    echo "Result: NO - the requested image is not deployed." >&2
+  fi
   exit 1
 fi
 
-echo "CronJob image matches expected immutable tag."
+if [ "${EXPECTING_LATEST}" = "true" ]; then
+  echo "Result: YES - the latest published version is deployed."
+else
+  echo "Result: YES - the requested image is deployed."
+fi
 
 if [ "${RUN_JOB}" != "true" ]; then
   exit 0
@@ -130,8 +147,8 @@ kubectl wait -n "${NAMESPACE}" "--for=condition=complete" "job/${VERIFY_JOB}" --
 
 job_image="$(kubectl get job "${VERIFY_JOB}" -n "${NAMESPACE}" -o jsonpath='{.spec.template.spec.containers[0].image}')"
 if [ "${job_image}" != "${EXPECTED_IMAGE}" ]; then
-  echo "error: verification job used image ${job_image}, expected ${EXPECTED_IMAGE}" >&2
+  echo "Runtime check: FAILED - the verification job used ${job_image}, expected ${EXPECTED_IMAGE}." >&2
   exit 1
 fi
 
-echo "Verification job completed with image ${job_image}."
+echo "Runtime check: PASSED - the verification job completed with ${job_image}."
