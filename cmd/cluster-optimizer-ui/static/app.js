@@ -2,7 +2,10 @@ const state = {
   data: null,
   selectedIndex: 0,
   severity: "all",
-  filter: ""
+  filter: "",
+  activity: { events: [], loading: false, error: null },
+  activityFilter: "all",
+  activityCollapsed: false
 };
 
 const els = {
@@ -45,7 +48,20 @@ const els = {
   emptyPanel: document.querySelector("#emptyPanel"),
   viewKicker: document.querySelector("#viewKicker"),
   viewTitle: document.querySelector("#viewTitle"),
-  filter: document.querySelector("#filter")
+  filter: document.querySelector("#filter"),
+  enginePillMode: document.querySelector("#enginePillMode"),
+  enginePillModeText: document.querySelector("#enginePillModeText"),
+  enginePillHalt: document.querySelector("#enginePillHalt"),
+  enginePillHaltText: document.querySelector("#enginePillHaltText"),
+  enginePillLastRun: document.querySelector("#enginePillLastRun"),
+  enginePillLastRunText: document.querySelector("#enginePillLastRunText"),
+  enginePillLastRunDetail: document.querySelector("#enginePillLastRunDetail"),
+  engineBanner: document.querySelector("#engineBanner"),
+  engineModePopover: document.querySelector("#engineModePopover"),
+  engineModeDetails: document.querySelector("#engineModeDetails"),
+  activityPanel: document.querySelector("#activityPanel"),
+  activityList: document.querySelector("#activityList"),
+  activityToggle: document.querySelector("#activityToggle")
 };
 
 document.querySelectorAll("[data-severity]").forEach((button) => {
@@ -81,12 +97,40 @@ els.limit.addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadReports();
 });
 
+els.enginePillMode.addEventListener("click", () => {
+  const open = !els.engineModePopover.classList.contains("hidden");
+  toggleEngineModePopover(!open);
+});
+els.engineModePopover.querySelector(".engine-popover-close").addEventListener("click", () => toggleEngineModePopover(false));
+document.addEventListener("click", (event) => {
+  if (els.engineModePopover.classList.contains("hidden")) return;
+  if (els.engineModePopover.contains(event.target) || els.enginePillMode.contains(event.target)) return;
+  toggleEngineModePopover(false);
+});
+
+document.querySelectorAll("[data-activity-filter]").forEach((button) => {
+  button.addEventListener("click", () => {
+    state.activityFilter = button.dataset.activityFilter;
+    document.querySelectorAll("[data-activity-filter]").forEach((item) => {
+      item.classList.toggle("active", item === button);
+    });
+    renderActivity();
+  });
+});
+
+els.activityToggle.addEventListener("click", () => {
+  state.activityCollapsed = !state.activityCollapsed;
+  state.activityCollapsedByUser = true;
+  applyActivityCollapse();
+});
+
 loadReports();
 
 async function loadReports() {
   clearError();
   els.refresh.disabled = true;
-  const clusterId = encodeURIComponent(els.clusterId.value.trim() || "default");
+  const clusterIdRaw = els.clusterId.value.trim() || "default";
+  const clusterId = encodeURIComponent(clusterIdRaw);
   const limit = encodeURIComponent(els.limit.value || "25");
   try {
     const response = await fetch(`/api/reports?cluster_id=${clusterId}&limit=${limit}`);
@@ -97,11 +141,29 @@ async function loadReports() {
     state.data = payload;
     state.selectedIndex = 0;
     render();
+    loadActivity(clusterIdRaw);
   } catch (error) {
     showError(error.message);
   } finally {
     els.refresh.disabled = false;
   }
+}
+
+async function loadActivity(clusterId) {
+  state.activity = { events: [], loading: true, error: null };
+  renderActivity();
+  try {
+    const response = await fetch(`/api/remediations/history?cluster_id=${encodeURIComponent(clusterId)}&limit=50`);
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || `Request failed with ${response.status}`);
+    }
+    state.activity = { events: payload.events || [], loading: false, error: null };
+  } catch (error) {
+    state.activity = { events: [], loading: false, error: error.message };
+  }
+  applyActivityAutoCollapse();
+  renderActivity();
 }
 
 function render() {
@@ -114,8 +176,10 @@ function render() {
   renderTimeline(reports);
   renderSummary(report);
   renderOptimizationOverview(report);
+  renderEngineStatus();
   renderTrends();
   renderFindings();
+  renderActivity();
 }
 
 function renderTimeline(reports) {
@@ -278,6 +342,308 @@ function renderOverviewActions(report) {
     `;
     els.overviewActions.append(row);
   });
+}
+
+function renderEngineStatus() {
+  const status = state.data?.engine_status || null;
+  const mode = engineMode(status);
+  els.enginePillMode.classList.remove("live", "dry-run", "disabled");
+  els.enginePillMode.classList.add(mode.toneClass);
+  els.enginePillModeText.textContent = mode.label;
+  els.enginePillMode.setAttribute("title", mode.tooltip);
+
+  const halt = Boolean(status?.halt_active);
+  els.enginePillHalt.classList.toggle("active", halt);
+  els.enginePillHaltText.textContent = halt ? "HALTED" : "Inactive";
+  els.enginePillHalt.title = halt
+    ? `Cluster ConfigMap cluster-optimizer/cluster-optimizer-halt is set: ${status?.halt_reason || "halt=true"}`
+    : "No halt ConfigMap value detected on the last run.";
+
+  if (!status || !status.last_run_at) {
+    els.enginePillLastRun.classList.remove("errors");
+    els.enginePillLastRunText.textContent = "Never";
+    els.enginePillLastRunDetail.textContent = "No remediation history yet";
+  } else {
+    const actions = Number(status.last_run_actions || 0);
+    const errors = Number(status.last_run_errors || 0);
+    const applied = Number(status.last_run_applied || 0);
+    els.enginePillLastRunText.textContent = formatRelative(status.last_run_at);
+    const parts = [`${actions} action${actions === 1 ? "" : "s"}`];
+    if (mode.live && applied > 0) parts.push(`${applied} applied`);
+    if (errors > 0) parts.push(`${errors} error${errors === 1 ? "" : "s"}`);
+    els.enginePillLastRunDetail.textContent = parts.join(" · ");
+    els.enginePillLastRun.classList.toggle("errors", errors > 0);
+  }
+
+  els.engineBanner.classList.toggle("hidden", !halt);
+  if (halt) {
+    els.engineBanner.textContent = `Active remediation is halted: ${status?.halt_reason || "cluster-optimizer/cluster-optimizer-halt ConfigMap is set to halt=true."}`;
+  }
+  renderEnginePopover(status);
+}
+
+function engineMode(status) {
+  if (!status) {
+    return { label: "Unknown", toneClass: "disabled", live: false, tooltip: "No engine status reported yet." };
+  }
+  if (!status.auto_apply_enabled && !status.nudge_enabled) {
+    return { label: "Disabled", toneClass: "disabled", live: false, tooltip: "Neither --auto-apply nor --nudge is enabled on the CronJob." };
+  }
+  if (status.halt_active) {
+    return { label: "Halted", toneClass: "disabled", live: false, tooltip: "Halt ConfigMap is set; remediation is paused." };
+  }
+  const live = status.auto_apply_live || status.nudge_live;
+  if (live) {
+    return { label: "Live", toneClass: "live", live: true, tooltip: "Both --auto-apply (or --nudge) AND the matching env var are true. Mutations happen." };
+  }
+  return { label: "Dry-run", toneClass: "dry-run", live: false, tooltip: "Engine is enabled but the second env-var gate is missing. No mutations." };
+}
+
+function renderEnginePopover(status) {
+  els.engineModeDetails.replaceChildren();
+  const rows = [
+    {
+      label: "auto-apply flag",
+      ok: Boolean(status?.auto_apply_enabled),
+      hint: status?.auto_apply_enabled ? "--auto-apply is passed" : "--auto-apply not set on the CronJob"
+    },
+    {
+      label: "auto-apply env",
+      ok: Boolean(status?.auto_apply_live),
+      hint: status?.auto_apply_live ? "CLUSTER_OPTIMIZER_AUTOAPPLY=true" : "CLUSTER_OPTIMIZER_AUTOAPPLY is not true"
+    },
+    {
+      label: "nudge flag",
+      ok: Boolean(status?.nudge_enabled),
+      hint: status?.nudge_enabled ? "--nudge is passed" : "--nudge not set on the CronJob"
+    },
+    {
+      label: "nudge live env",
+      ok: Boolean(status?.nudge_live),
+      hint: status?.nudge_live ? "CLUSTER_OPTIMIZER_NUDGE_LIVE=true" : "CLUSTER_OPTIMIZER_NUDGE_LIVE is not true"
+    },
+    {
+      label: "halt ConfigMap",
+      ok: !status?.halt_active,
+      hint: status?.halt_active ? `halted: ${status?.halt_reason || "halt=true"}` : "no halt detected"
+    }
+  ];
+  rows.forEach((row) => {
+    const li = document.createElement("li");
+    li.innerHTML = `<b>${escapeHtml(row.label)}</b> — ${row.ok ? "✓" : "✗"} ${escapeHtml(row.hint)}`;
+    els.engineModeDetails.append(li);
+  });
+}
+
+function toggleEngineModePopover(open) {
+  els.engineModePopover.classList.toggle("hidden", !open);
+  els.enginePillMode.setAttribute("aria-expanded", String(open));
+}
+
+function applyActivityAutoCollapse() {
+  // Default collapsed when there are zero events; expanded otherwise. Once
+  // the user clicks the toggle their preference sticks for the session.
+  if (state.activityCollapsedByUser) return;
+  state.activityCollapsed = (state.activity.events || []).length === 0;
+  applyActivityCollapse();
+}
+
+function applyActivityCollapse() {
+  if (state.activityCollapsed) {
+    els.activityPanel.classList.add("collapsed");
+    els.activityToggle.textContent = "Expand";
+    els.activityToggle.setAttribute("aria-expanded", "false");
+  } else {
+    els.activityPanel.classList.remove("collapsed");
+    els.activityToggle.textContent = "Collapse";
+    els.activityToggle.setAttribute("aria-expanded", "true");
+  }
+}
+
+function renderActivity() {
+  els.activityList.replaceChildren();
+  const halt = Boolean(state.data?.engine_status?.halt_active);
+  els.activityPanel.classList.toggle("halted", halt);
+  applyActivityCollapse();
+
+  if (state.activity.loading) {
+    const div = document.createElement("div");
+    div.className = "activity-empty";
+    div.textContent = "Loading recent activity…";
+    els.activityList.append(div);
+    return;
+  }
+  if (state.activity.error) {
+    const div = document.createElement("div");
+    div.className = "activity-empty";
+    div.textContent = `Could not load remediation history: ${state.activity.error}`;
+    els.activityList.append(div);
+    return;
+  }
+
+  const events = filterActivity(state.activity.events);
+  if (events.length === 0) {
+    const div = document.createElement("div");
+    div.className = "activity-empty";
+    if ((state.activity.events || []).length === 0) {
+      div.innerHTML = `No remediation activity in the last 7 days. The applier runs after each scheduled CronJob.`;
+    } else {
+      div.textContent = "No remediation activity matches this filter.";
+    }
+    els.activityList.append(div);
+    return;
+  }
+
+  events.forEach((event) => {
+    els.activityList.append(activityRow(event));
+  });
+}
+
+function filterActivity(events) {
+  switch (state.activityFilter) {
+    case "live":
+      return events.filter((event) => event.mode === "live");
+    case "dry-run":
+      return events.filter((event) => event.mode === "dry-run");
+    case "errors":
+      return events.filter((event) => event.error || event.eviction_errors > 0);
+    default:
+      return events;
+  }
+}
+
+function activityRow(event) {
+  const article = document.createElement("article");
+  const toneClass = (event.error || event.eviction_errors > 0) ? "error" : event.mode || "dry-run";
+  article.className = `activity-event ${toneClass}`;
+
+  const time = document.createElement("time");
+  time.dateTime = event.timestamp || "";
+  time.textContent = formatRelative(event.timestamp);
+  time.title = event.timestamp ? new Date(event.timestamp).toLocaleString() : "";
+
+  const scope = document.createElement("div");
+  scope.className = "scope";
+  if (event.kind === "cordon_evict") {
+    const target = event.target_node ? `node ${event.target_node}` : "consolidation pass";
+    scope.innerHTML = `<strong>${escapeHtml(target)}</strong><code>${escapeHtml(event.kind)}</code>`;
+  } else {
+    const scopeText = [event.namespace, event.workload].filter(Boolean).join("/") || "cluster";
+    const container = event.container ? ` · container ${escapeHtml(event.container)}` : "";
+    const rule = event.rule_id
+      ? `<code class="rule-link" data-rule="${escapeHtml(event.rule_id)}" data-namespace="${escapeHtml(event.namespace || "")}" data-workload="${escapeHtml(event.workload || "")}" title="Jump to this finding">${escapeHtml(event.rule_id)}</code>`
+      : "";
+    scope.innerHTML = `<strong>${escapeHtml(scopeText)}${container}</strong>${rule}`;
+  }
+  const link = scope.querySelector(".rule-link");
+  if (link) {
+    link.addEventListener("click", () => jumpToFinding(link.dataset.rule, link.dataset.namespace, link.dataset.workload));
+  }
+
+  const change = document.createElement("div");
+  change.className = "change";
+  change.innerHTML = changeSummary(event);
+
+  const badge = document.createElement("span");
+  badge.className = "status-badge";
+  if (event.halt_active) {
+    badge.classList.add("halted");
+    badge.textContent = "Halted";
+  } else if (event.error || event.eviction_errors > 0) {
+    badge.classList.add("errored");
+    badge.textContent = "Error";
+  } else if (event.applied) {
+    badge.classList.add("applied");
+    badge.textContent = "Applied";
+  } else if (event.mode === "dry-run") {
+    badge.classList.add("dry");
+    badge.textContent = "Dry-run";
+  } else {
+    badge.textContent = event.reason ? "Skipped" : "Reported";
+  }
+  if (event.kind === "patch_request" && event.applied && !findingStillActive(event)) {
+    const resolved = document.createElement("span");
+    resolved.className = "status-badge resolved";
+    resolved.textContent = "Resolved";
+    resolved.title = "This finding is no longer in the latest report.";
+    article.append(time, scope, change, badge, resolved);
+  } else {
+    article.append(time, scope, change, badge);
+  }
+
+  if (event.error) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Show error";
+    const pre = document.createElement("pre");
+    pre.textContent = event.error;
+    details.append(summary, pre);
+    article.append(details);
+  }
+  return article;
+}
+
+function changeSummary(event) {
+  if (event.kind === "cordon_evict") {
+    const parts = [];
+    if (event.target_node) {
+      parts.push(`target <b>${escapeHtml(event.target_node)}</b>`);
+    }
+    if (event.evicted > 0 || event.eviction_errors > 0) {
+      parts.push(`evicted <b>${event.evicted}</b>${event.eviction_errors > 0 ? ` · ${event.eviction_errors} failed` : ""}`);
+    }
+    if (parts.length === 0 && event.reason) {
+      parts.push(escapeHtml(event.reason));
+    }
+    return parts.join(" · ") || "—";
+  }
+  const segments = [];
+  if (event.before_cpu_m || event.after_cpu_m) {
+    segments.push(`cpu <b>${event.before_cpu_m || 0}m → ${event.after_cpu_m || 0}m</b>`);
+  }
+  if (event.before_memory_mib || event.after_memory_mib) {
+    segments.push(`mem <b>${event.before_memory_mib || 0}Mi → ${event.after_memory_mib || 0}Mi</b>`);
+  }
+  if (segments.length === 0) {
+    return escapeHtml(event.reason || "no field changed");
+  }
+  return segments.join(" · ");
+}
+
+function findingStillActive(event) {
+  const reports = state.data?.reports || [];
+  const latest = reports[0];
+  if (!latest) return true;
+  const key = [event.rule_id || "", event.namespace || "", event.workload || ""].join("\u0000");
+  return (latest.findings || []).some((finding) =>
+    findingKey(finding) === key
+  );
+}
+
+function jumpToFinding(rule, namespace, workload) {
+  if (state.severity !== "all") {
+    state.severity = "all";
+    document.querySelectorAll("[data-severity]").forEach((item) => {
+      item.classList.toggle("active", item.dataset.severity === "all");
+    });
+  }
+  state.filter = "";
+  els.filter.value = "";
+  renderFindings();
+  const cards = els.findingsList.querySelectorAll(".finding");
+  for (const card of cards) {
+    const heading = card.querySelector("h3")?.textContent || "";
+    const code = card.querySelector("header code")?.textContent || "";
+    const expectedScope = namespace && workload ? `${namespace}/${workload}` : (workload || "cluster");
+    if (heading === expectedScope && code === rule) {
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.classList.add("highlight");
+      setTimeout(() => card.classList.remove("highlight"), 1800);
+      return;
+    }
+  }
+  // Fallback: scroll to findings panel.
+  els.findingsList.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function renderFindings() {
@@ -544,6 +910,19 @@ function formatTime(value) {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function formatRelative(value) {
+  if (!value) return "Never";
+  const then = new Date(value).getTime();
+  if (!Number.isFinite(then)) return "Never";
+  const diffSec = Math.round((Date.now() - then) / 1000);
+  if (diffSec < 0) return formatTime(value);
+  if (diffSec < 60) return `${diffSec}s ago`;
+  if (diffSec < 3600) return `${Math.round(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.round(diffSec / 3600)}h ago`;
+  if (diffSec < 86400 * 7) return `${Math.round(diffSec / 86400)}d ago`;
+  return formatTime(value);
 }
 
 function formatMiB(value) {

@@ -47,6 +47,31 @@
         <span><b id="reportCount">0</b><em>reports</em></span>
       </section>
 
+      <section id="engineStrip" class="engine-strip" aria-label="Active remediation engine status">
+        <button id="enginePillMode" class="engine-pill" type="button" aria-haspopup="dialog" aria-expanded="false">
+          <em>Mode</em>
+          <b id="enginePillModeText">Unknown</b>
+        </button>
+        <div id="enginePillHalt" class="engine-pill halt">
+          <em>Halt switch</em>
+          <b id="enginePillHaltText">Inactive</b>
+        </div>
+        <div id="enginePillLastRun" class="engine-pill">
+          <em>Last run</em>
+          <b id="enginePillLastRunText">Never</b>
+          <small id="enginePillLastRunDetail">No remediation history yet</small>
+        </div>
+      </section>
+
+      <section id="engineBanner" class="engine-banner hidden" role="alert"></section>
+
+      <section id="engineModePopover" class="engine-popover hidden" role="dialog" aria-label="Mode details">
+        <h3>How remediation mode is decided</h3>
+        <p>Live remediation requires <em>both</em> the <code>--auto-apply</code> CLI flag <em>and</em> the <code>CLUSTER_OPTIMIZER_AUTOAPPLY=true</code> environment variable. Either one alone keeps the engine in dry-run mode. The halt ConfigMap overrides both.</p>
+        <ul id="engineModeDetails"></ul>
+        <button type="button" class="engine-popover-close">Close</button>
+      </section>
+
       <main class="workspace">
         <section class="scoreboard" aria-label="Cluster summary">
           <button class="metric" type="button" data-view="all">
@@ -117,6 +142,25 @@
             </div>
             <div id="overviewActions" class="overview-actions" aria-label="Current optimization actions"></div>
           </div>
+        </section>
+
+        <section id="activityPanel" class="activity-panel" aria-label="Recent active remediation">
+          <header class="panel-head">
+            <div>
+              <p>Active Remediation</p>
+              <h2>Recent Activity</h2>
+            </div>
+            <div class="activity-controls">
+              <div class="segmented activity-filter" role="group" aria-label="Activity filter">
+                <button class="segment active" type="button" data-activity-filter="all">All</button>
+                <button class="segment" type="button" data-activity-filter="live">Live only</button>
+                <button class="segment" type="button" data-activity-filter="errors">Errors</button>
+                <button class="segment" type="button" data-activity-filter="dry-run">Dry-run</button>
+              </div>
+              <button id="activityToggle" type="button" class="activity-toggle" aria-expanded="true" aria-controls="activityList">Collapse</button>
+            </div>
+          </header>
+          <div id="activityList" class="activity-list"></div>
         </section>
 
         <section class="trend-panel" aria-label="Aggregations and trends">

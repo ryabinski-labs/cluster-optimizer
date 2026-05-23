@@ -61,10 +61,12 @@ func run(ctx context.Context, args []string) error {
 	report := analyzer.AnalyzeWith(snapshot, cls)
 
 	var occurrences map[string]int64
+	var writer *store.DynamoDBWriter
 	if table := os.Getenv("DYNAMODB_TABLE"); table != "" {
-		writer, err := store.NewDynamoDBWriter(ctx, table)
-		if err != nil {
-			return err
+		var werr error
+		writer, werr = store.NewDynamoDBWriter(ctx, table)
+		if werr != nil {
+			return werr
 		}
 		// Fetch existing recs BEFORE the planner runs so PutReport's bump
 		// doesn't inflate this run's count, and hand the same map to
@@ -97,6 +99,19 @@ func run(ctx context.Context, args []string) error {
 	// so we don't need to gate on autoApply here — only on having actions.
 	policy := plan.DefaultPolicy()
 	p := plan.Build(report, snapshot, cls, policy, occurrences)
+	autoApplyEnv := envBoolOr("CLUSTER_OPTIMIZER_AUTOAPPLY", false)
+	nudgeLive := envBoolOr("CLUSTER_OPTIMIZER_NUDGE_LIVE", false)
+
+	status := store.EngineStatus{
+		AutoApplyEnabled: autoApply,
+		AutoApplyLive:    autoApply && autoApplyEnv,
+		NudgeEnabled:     nudge,
+		NudgeLive:        nudge && nudgeLive,
+		LastRunAt:        time.Now().UTC(),
+		LastClusterID:    clusterID,
+	}
+	var events []store.RemediationEvent
+
 	if len(p.Actions) > 0 {
 		clientset, clientErr := collector.GetClientset()
 		if clientErr != nil {
@@ -104,8 +119,19 @@ func run(ctx context.Context, args []string) error {
 		} else {
 			opts := applier.NewOptions()
 			opts.AutoApply = autoApply
-			opts.AutoApplyEnvSet = envBoolOr("CLUSTER_OPTIMIZER_AUTOAPPLY", false)
-			_ = applier.Apply(ctx, clientset, p, opts)
+			opts.AutoApplyEnvSet = autoApplyEnv
+			result := applier.Apply(ctx, clientset, p, opts)
+			status.HaltActive = status.HaltActive || result.Halted
+			events = append(events, applierEvents(result, status.LastRunAt)...)
+			status.LastRunActions += len(result.Outcomes)
+			for _, outcome := range result.Outcomes {
+				if outcome.Applied {
+					status.LastRunApplied++
+				}
+				if outcome.Error != "" {
+					status.LastRunErrors++
+				}
+			}
 		}
 	}
 
@@ -115,13 +141,101 @@ func run(ctx context.Context, args []string) error {
 			return fmt.Errorf("failed to get kubernetes clientset for active nudging: %w", err)
 		}
 		nudgeOpts := nudger.NewOptions()
-		nudgeOpts.Live = envBoolOr("CLUSTER_OPTIMIZER_NUDGE_LIVE", false)
-		if err := nudger.NudgePods(ctx, clientset, nudgeOpts); err != nil {
+		nudgeOpts.Live = nudgeLive
+		nudgeResult, err := nudger.NudgePodsWithResult(ctx, clientset, nudgeOpts)
+		if err != nil {
 			return fmt.Errorf("active nudging failed: %w", err)
+		}
+		status.HaltActive = status.HaltActive || nudgeResult.Halted
+		if nudgeResult.HaltReason != "" {
+			status.HaltReason = nudgeResult.HaltReason
+		}
+		if event, ok := nudgerEvent(nudgeResult, status.LastRunAt); ok {
+			events = append(events, event)
+			status.LastRunActions++
+			if event.Applied {
+				status.LastRunApplied++
+			}
+			if event.Error != "" {
+				status.LastRunErrors++
+			}
+		}
+	}
+
+	if writer != nil {
+		if err := writer.PutRemediations(ctx, clusterID, events); err != nil {
+			fmt.Fprintf(os.Stderr, "cluster-optimizer: failed to persist remediation events: %v\n", err)
+		}
+		if err := writer.PutEngineStatus(ctx, clusterID, status); err != nil {
+			fmt.Fprintf(os.Stderr, "cluster-optimizer: failed to persist engine status: %v\n", err)
 		}
 	}
 
 	return nil
+}
+
+// applierEvents converts the applier outcome list into RemediationEvents the
+// UI can render. before/after values are 0 when a side (cpu or mem) wasn't
+// touched — the JSON omitempty tag drops the noise.
+func applierEvents(result applier.Result, ts time.Time) []store.RemediationEvent {
+	events := make([]store.RemediationEvent, 0, len(result.Outcomes))
+	mode := "live"
+	if result.DryRun {
+		mode = "dry-run"
+	}
+	for _, outcome := range result.Outcomes {
+		event := store.RemediationEvent{
+			Timestamp:       ts,
+			Mode:            mode,
+			Kind:            "patch_request",
+			Namespace:       outcome.Action.Namespace,
+			Workload:        outcome.Action.WorkloadName,
+			WorkloadKind:    outcome.Action.WorkloadKind,
+			Container:       outcome.Action.Container,
+			RuleID:          outcome.Action.FindingRuleID,
+			Applied:         outcome.Applied,
+			Reason:          outcome.Reason,
+			Error:           outcome.Error,
+			HaltActive:      result.Halted,
+			OccurrenceCount: outcome.Action.OccurrenceCount,
+		}
+		if outcome.Action.NewCPUm > 0 {
+			event.BeforeCPUm = outcome.Action.CurrentCPUm
+			event.AfterCPUm = outcome.Action.NewCPUm
+		}
+		if outcome.Action.NewMemMiB > 0 {
+			event.BeforeMemMiB = outcome.Action.CurrentMemMiB
+			event.AfterMemMiB = outcome.Action.NewMemMiB
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+// nudgerEvent collapses one consolidation pass into a single audit row. The
+// ok=false return covers the "engine ran but nothing to report" case
+// (cluster too small, no target found) so we don't flood the feed with
+// empty rows on every CronJob tick.
+func nudgerEvent(result nudger.Result, ts time.Time) (store.RemediationEvent, bool) {
+	if result.TargetNode == "" && !result.Halted && result.NotFeasibleReason == "" {
+		return store.RemediationEvent{}, false
+	}
+	reason := result.NotFeasibleReason
+	if result.Halted && result.HaltReason != "" {
+		reason = result.HaltReason
+	}
+	event := store.RemediationEvent{
+		Timestamp:      ts,
+		Mode:           result.Mode,
+		Kind:           "cordon_evict",
+		TargetNode:     result.TargetNode,
+		Evicted:        result.Evicted,
+		EvictionErrors: result.EvictionErrors,
+		HaltActive:     result.Halted,
+		Reason:         reason,
+		Applied:        result.Mode == "live" && result.TargetNode != "" && result.EvictionErrors == 0,
+	}
+	return event, true
 }
 
 func envOr(key, fallback string) string {

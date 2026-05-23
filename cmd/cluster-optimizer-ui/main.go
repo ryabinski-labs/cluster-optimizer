@@ -38,11 +38,56 @@ type reportRecord struct {
 }
 
 type apiResponse struct {
-	ClusterID string         `json:"cluster_id"`
-	Table     string         `json:"table"`
-	Region    string         `json:"region"`
-	Reports   []reportRecord `json:"reports"`
-	Trend     trendResponse  `json:"trend"`
+	ClusterID    string         `json:"cluster_id"`
+	Table        string         `json:"table"`
+	Region       string         `json:"region"`
+	Reports      []reportRecord `json:"reports"`
+	Trend        trendResponse  `json:"trend"`
+	EngineStatus *engineStatus  `json:"engine_status,omitempty"`
+}
+
+// engineStatus mirrors store.EngineStatus for the UI. We keep a thin local
+// type so the JSON wire format is owned here and stays stable even if the
+// store struct adds fields.
+type engineStatus struct {
+	AutoApplyEnabled bool      `json:"auto_apply_enabled"`
+	AutoApplyLive    bool      `json:"auto_apply_live"`
+	NudgeEnabled     bool      `json:"nudge_enabled"`
+	NudgeLive        bool      `json:"nudge_live"`
+	HaltActive       bool      `json:"halt_active"`
+	HaltReason       string    `json:"halt_reason,omitempty"`
+	LastRunAt        time.Time `json:"last_run_at"`
+	LastRunActions   int       `json:"last_run_actions"`
+	LastRunApplied   int       `json:"last_run_applied"`
+	LastRunErrors    int       `json:"last_run_errors"`
+}
+
+type remediationEvent struct {
+	Timestamp       time.Time `json:"timestamp"`
+	Mode            string    `json:"mode"`
+	Kind            string    `json:"kind"`
+	Namespace       string    `json:"namespace,omitempty"`
+	Workload        string    `json:"workload,omitempty"`
+	WorkloadKind    string    `json:"workload_kind,omitempty"`
+	Container       string    `json:"container,omitempty"`
+	RuleID          string    `json:"rule_id,omitempty"`
+	BeforeCPUm      int64     `json:"before_cpu_m,omitempty"`
+	AfterCPUm       int64     `json:"after_cpu_m,omitempty"`
+	BeforeMemMiB    int64     `json:"before_memory_mib,omitempty"`
+	AfterMemMiB     int64     `json:"after_memory_mib,omitempty"`
+	Applied         bool      `json:"applied"`
+	Reason          string    `json:"reason,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	HaltActive      bool      `json:"halt_active,omitempty"`
+	TargetNode      string    `json:"target_node,omitempty"`
+	Evicted         int       `json:"evicted,omitempty"`
+	EvictionErrors  int       `json:"eviction_errors,omitempty"`
+	OccurrenceCount int64     `json:"occurrence_count,omitempty"`
+}
+
+type remediationHistoryResponse struct {
+	ClusterID string             `json:"cluster_id"`
+	Events    []remediationEvent `json:"events"`
 }
 
 type trendResponse struct {
@@ -237,6 +282,7 @@ func run(ctx context.Context, args []string) error {
 	mux.HandleFunc("/api/reports", srv.handleReports)
 	mux.HandleFunc("/api/remediations", srv.handleRemediation)
 	mux.HandleFunc("/api/remediations/download", srv.handleDownload)
+	mux.HandleFunc("/api/remediations/history", srv.handleRemediationHistory)
 	mux.HandleFunc("/api/health", srv.handleHealth)
 	mux.Handle("/", srv.static)
 
@@ -278,12 +324,101 @@ func (s *server) handleReports(w http.ResponseWriter, r *http.Request) {
 		reports = allReports[:limit]
 	}
 
+	// Engine status is best-effort — a missing sentinel just means this
+	// cluster has never run the remediation engine, and the UI should
+	// render the strip in its "no data yet" state. Don't fail the whole
+	// response for it.
+	var status *engineStatus
+	if loaded, loadErr := store.LoadEngineStatus(ctx, s.client, s.table, clusterID); loadErr != nil {
+		log.Printf("engine status load failed for %s: %v", clusterID, loadErr)
+	} else if loaded != nil {
+		status = &engineStatus{
+			AutoApplyEnabled: loaded.AutoApplyEnabled,
+			AutoApplyLive:    loaded.AutoApplyLive,
+			NudgeEnabled:     loaded.NudgeEnabled,
+			NudgeLive:        loaded.NudgeLive,
+			HaltActive:       loaded.HaltActive,
+			HaltReason:       loaded.HaltReason,
+			LastRunAt:        loaded.LastRunAt,
+			LastRunActions:   loaded.LastRunActions,
+			LastRunApplied:   loaded.LastRunApplied,
+			LastRunErrors:    loaded.LastRunErrors,
+		}
+	}
+
 	writeJSON(w, http.StatusOK, apiResponse{
+		ClusterID:    clusterID,
+		Table:        s.table,
+		Region:       s.region,
+		Reports:      reports,
+		Trend:        s.buildTrend(allReports, rollups),
+		EngineStatus: status,
+	})
+}
+
+// handleRemediationHistory returns the recent remediation audit log for a
+// cluster. Defaults: 7-day window, 50-event cap; UI may raise either via
+// `since` (RFC3339) and `limit` (1-200) query params.
+func (s *server) handleRemediationHistory(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	clusterID := r.URL.Query().Get("cluster_id")
+	if clusterID == "" {
+		clusterID = "default"
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 200 {
+			writeError(w, http.StatusBadRequest, "limit must be between 1 and 200")
+			return
+		}
+		limit = value
+	}
+	since := time.Now().Add(-7 * 24 * time.Hour)
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "since must be RFC3339")
+			return
+		}
+		since = parsed
+	}
+
+	loaded, err := store.LoadRemediations(ctx, s.client, s.table, clusterID, since, limit)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	events := make([]remediationEvent, 0, len(loaded))
+	for _, event := range loaded {
+		events = append(events, remediationEvent{
+			Timestamp:       event.Timestamp,
+			Mode:            event.Mode,
+			Kind:            event.Kind,
+			Namespace:       event.Namespace,
+			Workload:        event.Workload,
+			WorkloadKind:    event.WorkloadKind,
+			Container:       event.Container,
+			RuleID:          event.RuleID,
+			BeforeCPUm:      event.BeforeCPUm,
+			AfterCPUm:       event.AfterCPUm,
+			BeforeMemMiB:    event.BeforeMemMiB,
+			AfterMemMiB:     event.AfterMemMiB,
+			Applied:         event.Applied,
+			Reason:          event.Reason,
+			Error:           event.Error,
+			HaltActive:      event.HaltActive,
+			TargetNode:      event.TargetNode,
+			Evicted:         event.Evicted,
+			EvictionErrors:  event.EvictionErrors,
+			OccurrenceCount: event.OccurrenceCount,
+		})
+	}
+	writeJSON(w, http.StatusOK, remediationHistoryResponse{
 		ClusterID: clusterID,
-		Table:     s.table,
-		Region:    s.region,
-		Reports:   reports,
-		Trend:     s.buildTrend(allReports, rollups),
+		Events:    events,
 	})
 }
 
