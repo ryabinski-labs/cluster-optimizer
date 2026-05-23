@@ -4,6 +4,14 @@ All notable changes to Cluster Optimizer will be documented in this file.
 
 ## Unreleased
 
+- Added `provider_managed` and `remediable` fields to every analyzer finding so remediators can refuse to touch DOKS-reconciled DaemonSets (kube-proxy, cilium, csi-do-node, do-node-agent, doks-telemetry-config-reloader, konnectivity-agent, hubble-relay/ui, coredns, metrics-server, cpc-bridge-proxy) and so callers can tell at a glance which findings have a remediation target configured.
+- Added DaemonSet and StatefulSet support to `api-yml-remediator` for `memory-request-over-provisioned` and `cpu-request-over-provisioned` rules, with an explicit refusal to patch provider-managed workload names.
+- Added a `plan` package that turns findings into an auditable list of `PlannedAction`s with safety defaults (confidence=high, ≥3 occurrences, 50% max trim per pass, 10m/32Mi floors, 1 action per run), and skips with a recorded reason when any gate fails.
+- Added an `applier` package and `--auto-apply` flag that can patch workload resource requests live via the Kubernetes API. Defaults to dry-run; live mutation requires BOTH `--auto-apply` and `CLUSTER_OPTIMIZER_AUTOAPPLY=true`. Reads a halt ConfigMap (`cluster-optimizer/cluster-optimizer-halt`, key `halt=true`) before any mutation and fails closed if it can't be read.
+- Extended `nudger` with a dry-run default (`CLUSTER_OPTIMIZER_NUDGE_LIVE=true` required to actually cordon/evict), a shared halt-switch check, and a PDB pre-flight that aborts when the eviction would be blocked.
+- Added optional `manifests/rbac-applier.yaml` granting the applier the minimum `patch` verb on Deployments, DaemonSets, and StatefulSets in the `default` namespace, plus a single-resource `get` on the halt ConfigMap.
+- Added `docs/runbook.md` with halt-switch activation, single-workload rollback, uncordon, CronJob suspend, applier RBAC revoke, and a "did the optimizer cause this incident?" checklist.
+- Updated `docs/architecture.md` to document the classifier, planner, applier, nudger options, and the expanded risk register.
 - Added an `api.yml` remediation for the `cpu-hpa-low-request-sensitive` rule that adds or raises HPA scale-up and scale-down stabilization windows, reusing the existing remediator, workflow, UI, and remediation-target interfaces.
 - Updated local Kubernetes deployment and verification scripts to resolve the latest successfully published image tag when no explicit tag is provided.
 - Added local deployment helper scripts that trigger the CI/CD deploy workflow and verify the live CronJob image tag.

@@ -22,6 +22,36 @@ const (
 	hpaScaleDownStabilizationSeconds = 300
 )
 
+// providerManagedWorkloadNames lists workloads whose specs are reconciled by
+// DOKS. Editing the manifest is futile (control plane reverts) and risky.
+// Kept in sync with internal/classifier; duplicated to keep this CLI free of
+// the analyzer/classifier import cycle and runnable as a standalone binary.
+var providerManagedWorkloadNames = map[string]bool{
+	"kube-proxy":                     true,
+	"cilium":                         true,
+	"cilium-operator":                true,
+	"csi-do-node":                    true,
+	"csi-do-controller":              true,
+	"do-node-agent":                  true,
+	"doks-telemetry-config-reloader": true,
+	"doks-telemetry-fluent-bit":      true,
+	"konnectivity-agent":             true,
+	"hubble-relay":                   true,
+	"hubble-ui":                      true,
+	"coredns":                        true,
+	"metrics-server":                 true,
+	"cpc-bridge-proxy":               true,
+}
+
+// supportedKindsForRequestPatch enumerates pod-template-bearing workload
+// kinds we are willing to patch in api.yml manifests. Adding new kinds here
+// is intentional: each requires manual review of spec.template.spec.
+var supportedKindsForRequestPatch = map[string]bool{
+	"Deployment":  true,
+	"StatefulSet": true,
+	"DaemonSet":   true,
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "api-yml-remediator: %v\n", err)
@@ -121,6 +151,12 @@ func patchContainerRequests(docs []*yaml.Node, workload, container, cpuRequest, 
 	kind, name, ok := strings.Cut(workload, "/")
 	if !ok {
 		return false, fmt.Errorf("workload must be Kind/name, got %q", workload)
+	}
+	if !supportedKindsForRequestPatch[kind] {
+		return false, fmt.Errorf("kind %q is not supported for request patching", kind)
+	}
+	if providerManagedWorkloadNames[name] {
+		return false, fmt.Errorf("workload %q is reconciled by the cloud provider and will not be patched", workload)
 	}
 	for _, doc := range docs {
 		root := documentRoot(doc)

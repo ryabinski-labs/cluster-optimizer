@@ -212,6 +212,86 @@ func TestRunFailsWhenHPATargetMissing(t *testing.T) {
 	}
 }
 
+const daemonSetWithRequests = `apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+spec:
+  template:
+    spec:
+      containers:
+        - name: fluent-bit
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+`
+
+func TestRunPatchesDaemonSetMemoryRequest(t *testing.T) {
+	path := writeTempManifest(t, daemonSetWithRequests)
+	if err := run([]string{
+		"--file", path,
+		"--workload", "DaemonSet/fluent-bit",
+		"--container", "fluent-bit",
+		"--rule-id", "memory-request-over-provisioned",
+		"--memory-request", "96Mi",
+	}); err != nil {
+		t.Fatalf("run() error: %v", err)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read patched manifest: %v", err)
+	}
+	if !strings.Contains(string(payload), "memory: 96Mi") {
+		t.Fatalf("expected memory request to be 96Mi, got:\n%s", payload)
+	}
+	if !strings.Contains(string(payload), "cpu: 100m") {
+		t.Fatalf("expected cpu request to be preserved, got:\n%s", payload)
+	}
+}
+
+func TestRunRefusesProviderManagedWorkload(t *testing.T) {
+	manifest := strings.Replace(daemonSetWithRequests, "fluent-bit", "kube-proxy", -1)
+	path := writeTempManifest(t, manifest)
+	err := run([]string{
+		"--file", path,
+		"--workload", "DaemonSet/kube-proxy",
+		"--container", "kube-proxy",
+		"--rule-id", "memory-request-over-provisioned",
+		"--memory-request", "96Mi",
+	})
+	if err == nil {
+		t.Fatal("run() should refuse to patch provider-managed workload")
+	}
+	if !strings.Contains(err.Error(), "reconciled by the cloud provider") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if !strings.Contains(string(payload), "memory: 256Mi") {
+		t.Fatalf("manifest must be unchanged on refusal, got:\n%s", payload)
+	}
+}
+
+func TestRunRejectsUnsupportedKind(t *testing.T) {
+	path := writeTempManifest(t, daemonSetWithRequests)
+	err := run([]string{
+		"--file", path,
+		"--workload", "Job/fluent-bit",
+		"--container", "fluent-bit",
+		"--rule-id", "memory-request-over-provisioned",
+		"--memory-request", "96Mi",
+	})
+	if err == nil {
+		t.Fatal("run() should refuse unsupported kind")
+	}
+	if !strings.Contains(err.Error(), "not supported for request patching") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestPatchHPASensitivityReportsChangeForLowWindow(t *testing.T) {
 	docs, err := decodeYAMLDocuments([]byte(hpaWithLowScaleUp))
 	if err != nil {

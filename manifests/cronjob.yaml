@@ -27,6 +27,9 @@ spec:
               image: ghcr.io/gipsychef/cluster-optimizer:latest
               imagePullPolicy: IfNotPresent
               args: ["--output", "json"]
+              # To opt in to live auto-apply, ADD "--auto-apply" to args AND
+              # set CLUSTER_OPTIMIZER_AUTOAPPLY=true below. Both are required.
+              # Also apply manifests/rbac-applier.yaml. See README.md.
               env:
                 - name: CLUSTER_OPTIMIZER_CLUSTER_ID
                   value: "default"
@@ -34,6 +37,20 @@ spec:
                 # stdout-only reports collected by Kubernetes job logs.
                 # - name: DYNAMODB_TABLE
                 #   value: cluster-optimizer-reports
+                # Live in-cluster auto-apply gate. Off by default. Setting
+                # this WITHOUT also passing --auto-apply keeps dry-run.
+                # - name: CLUSTER_OPTIMIZER_AUTOAPPLY
+                #   value: "true"
+                # Live nudger (cordon + evict) gate. Off by default; the
+                # nudger logs a dry-run plan unless this is true.
+                # - name: CLUSTER_OPTIMIZER_NUDGE_LIVE
+                #   value: "true"
+              # volumeMounts:
+              #   # To enable PR-gated remediation or live applier, mount a
+              #   # ConfigMap built from config/remediation-targets.json:
+              #   - name: targets
+              #     mountPath: /etc/cluster-optimizer
+              #     readOnly: true
               resources:
                 requests:
                   cpu: 1m
@@ -46,3 +63,7 @@ spec:
                 readOnlyRootFilesystem: true
                 capabilities:
                   drop: ["ALL"]
+          # volumes:
+          #   - name: targets
+          #     configMap:
+          #       name: cluster-optimizer-targets

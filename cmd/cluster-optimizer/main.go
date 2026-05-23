@@ -10,8 +10,11 @@ import (
 	"time"
 
 	"github.com/GipsyChef/cluster-optimizer/internal/analyzer"
+	"github.com/GipsyChef/cluster-optimizer/internal/applier"
+	"github.com/GipsyChef/cluster-optimizer/internal/classifier"
 	"github.com/GipsyChef/cluster-optimizer/internal/collector"
 	"github.com/GipsyChef/cluster-optimizer/internal/nudger"
+	"github.com/GipsyChef/cluster-optimizer/internal/plan"
 	"github.com/GipsyChef/cluster-optimizer/internal/store"
 )
 
@@ -27,11 +30,15 @@ func run(ctx context.Context, args []string) error {
 	var output string
 	var timeout time.Duration
 	var nudge bool
+	var autoApply bool
+	var targetsPath string
 	flags := flag.NewFlagSet("cluster-optimizer", flag.ContinueOnError)
 	flags.StringVar(&clusterID, "cluster-id", envOr("CLUSTER_OPTIMIZER_CLUSTER_ID", "default"), "stable cluster identifier")
 	flags.StringVar(&output, "output", envOr("OUTPUT_FORMAT", "json"), "json or text")
 	flags.DurationVar(&timeout, "timeout", 25*time.Second, "collection timeout")
-	flags.BoolVar(&nudge, "nudge", envBoolOr("CLUSTER_OPTIMIZER_NUDGE", false), "actively nudge pods to run on fewer nodes")
+	flags.BoolVar(&nudge, "nudge", envBoolOr("CLUSTER_OPTIMIZER_NUDGE", false), "actively nudge pods to run on fewer nodes (dry-run unless CLUSTER_OPTIMIZER_NUDGE_LIVE=true)")
+	flags.BoolVar(&autoApply, "auto-apply", envBoolOr("CLUSTER_OPTIMIZER_AUTOAPPLY_FLAG", false), "request live in-cluster auto-apply (requires CLUSTER_OPTIMIZER_AUTOAPPLY=true env to actually mutate)")
+	flags.StringVar(&targetsPath, "targets", envOr("CLUSTER_OPTIMIZER_TARGETS", "/etc/cluster-optimizer/remediation-targets.json"), "path to remediation-targets.json")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -39,11 +46,33 @@ func run(ctx context.Context, args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	targets, err := classifier.LoadTargets(targetsPath)
+	if err != nil {
+		// Loading targets is best-effort; an unreadable file should not
+		// prevent the advisory run, but it does prevent any remediation.
+		fmt.Fprintf(os.Stderr, "cluster-optimizer: failed to load targets at %q: %v\n", targetsPath, err)
+	}
+	cls := classifier.New(clusterID, targets)
+
 	snapshot, err := collector.Collect(ctx, clusterID)
 	if err != nil {
 		return err
 	}
-	report := analyzer.Analyze(snapshot)
+	report := analyzer.AnalyzeWith(snapshot, cls)
+
+	var occurrences map[string]int64
+	if table := os.Getenv("DYNAMODB_TABLE"); table != "" {
+		writer, err := store.NewDynamoDBWriter(ctx, table)
+		if err != nil {
+			return err
+		}
+		// Fetch occurrences BEFORE the planner runs so PutReport's bump
+		// doesn't inflate this run's count.
+		occurrences, _ = writer.Occurrences(ctx, clusterID)
+		if err := writer.PutReport(ctx, report); err != nil {
+			return err
+		}
+	}
 
 	switch output {
 	case "json":
@@ -58,13 +87,20 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("unsupported output format %q", output)
 	}
 
-	if table := os.Getenv("DYNAMODB_TABLE"); table != "" {
-		writer, err := store.NewDynamoDBWriter(ctx, table)
-		if err != nil {
-			return err
-		}
-		if err := writer.PutReport(ctx, report); err != nil {
-			return err
+	// Build a plan and, when there is work to log, hand it to the applier.
+	// The applier internally chooses dry-run vs live based on its gates,
+	// so we don't need to gate on autoApply here — only on having actions.
+	policy := plan.DefaultPolicy()
+	p := plan.Build(report, snapshot, cls, policy, occurrences)
+	if len(p.Actions) > 0 {
+		clientset, clientErr := collector.GetClientset()
+		if clientErr != nil {
+			fmt.Fprintf(os.Stderr, "cluster-optimizer: cannot build clientset for applier: %v\n", clientErr)
+		} else {
+			opts := applier.NewOptions()
+			opts.AutoApply = autoApply
+			opts.AutoApplyEnvSet = envBoolOr("CLUSTER_OPTIMIZER_AUTOAPPLY", false)
+			_ = applier.Apply(ctx, clientset, p, opts)
 		}
 	}
 
@@ -73,7 +109,9 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to get kubernetes clientset for active nudging: %w", err)
 		}
-		if err := nudger.NudgePods(ctx, clientset); err != nil {
+		nudgeOpts := nudger.NewOptions()
+		nudgeOpts.Live = envBoolOr("CLUSTER_OPTIMIZER_NUDGE_LIVE", false)
+		if err := nudger.NudgePods(ctx, clientset, nudgeOpts); err != nil {
 			return fmt.Errorf("active nudging failed: %w", err)
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GipsyChef/cluster-optimizer/internal/classifier"
 	"github.com/GipsyChef/cluster-optimizer/internal/model"
 	"github.com/GipsyChef/cluster-optimizer/internal/quantity"
 )
@@ -23,6 +24,14 @@ type Finding struct {
 	Risk               string            `json:"risk"`
 	Confidence         string            `json:"confidence"`
 	Pillars            map[string]string `json:"pillars"`
+	// ProviderManaged is true when the underlying resource is reconciled by
+	// the cloud provider's control plane (e.g. DOKS-managed DaemonSets).
+	// Remediators must never mutate these.
+	ProviderManaged bool `json:"provider_managed,omitempty"`
+	// Remediable is true when a target in remediation-targets.json supports
+	// this rule for this workload. Live applier consumes only remediable
+	// findings.
+	Remediable bool `json:"remediable,omitempty"`
 }
 
 type Report struct {
@@ -32,7 +41,17 @@ type Report struct {
 	Findings    []Finding              `json:"findings"`
 }
 
+// Analyze runs the rule pipelines and returns a Report. It does not tag
+// findings with provider_managed / remediable; callers that want those
+// classifications should call AnalyzeWith with a configured Classifier.
 func Analyze(snapshot model.Snapshot) Report {
+	return AnalyzeWith(snapshot, nil)
+}
+
+// AnalyzeWith runs the rule pipelines and tags each finding using the
+// supplied Classifier. If classifier is nil, findings are returned untagged
+// (preserving prior behaviour for tests and callers that haven't migrated).
+func AnalyzeWith(snapshot model.Snapshot, c *classifier.Classifier) Report {
 	findings := append([]Finding{}, analyzePDBs(snapshot.Workloads, snapshot.PDBs)...)
 	findings = append(findings, analyzeHPAs(snapshot.Workloads, snapshot.HPAs)...)
 	findings = append(findings, analyzeHPASensitivity(snapshot.Workloads, snapshot.HPAs)...)
@@ -41,6 +60,13 @@ func Analyze(snapshot model.Snapshot) Report {
 	findings = append(findings, analyzeRuntimeModernization(snapshot.Workloads)...)
 	findings = append(findings, analyzeDaemonSetOverhead(snapshot)...)
 	findings = append(findings, analyzeClusterHygiene(snapshot.Pods)...)
+	if c != nil {
+		for i := range findings {
+			findings[i].ProviderManaged = c.IsProviderManaged(findings[i].Namespace, findings[i].Workload)
+			findings[i].Remediable = !findings[i].ProviderManaged &&
+				c.IsRemediable(findings[i].RuleID, findings[i].Namespace, findings[i].Workload)
+		}
+	}
 	sort.SliceStable(findings, func(i, j int) bool {
 		return findingRank(findings[i]) < findingRank(findings[j])
 	})

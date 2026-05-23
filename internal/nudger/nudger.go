@@ -6,17 +6,57 @@ import (
 	"log"
 	"sort"
 
+	"github.com/GipsyChef/cluster-optimizer/internal/applier"
 	corev1 "k8s.io/api/core/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
+// Options gates and configures the nudger. The zero value is dry-run with
+// a single cordon+evict pass — safe to default to.
+type Options struct {
+	// Live, when true, actually cordons the node and evicts pods. Default
+	// false: dry-run only prints the consolidation plan.
+	Live bool
+	// HaltNamespace / HaltConfigMap / HaltKey identify the kill switch
+	// (same one the applier uses). An operator can stop both mutation
+	// paths by writing halt=true into the configmap.
+	HaltNamespace string
+	HaltConfigMap string
+	HaltKey       string
+}
+
+// NewOptions returns Options with the same safe defaults as the applier
+// (dry-run, halt switch at cluster-optimizer/cluster-optimizer-halt).
+func NewOptions() Options {
+	return Options{
+		HaltNamespace: applier.DefaultHaltNamespace,
+		HaltConfigMap: applier.DefaultHaltConfigMap,
+		HaltKey:       applier.DefaultHaltKey,
+	}
+}
+
 // NudgePods scans the cluster nodes and active pods, determines if any node's
 // workloads can be fully consolidated/packed onto the remaining schedulable nodes,
 // and if so, cordons the candidate node and evicts its pods.
-func NudgePods(ctx context.Context, clientset kubernetes.Interface) error {
-	log.Println("Active Nudger: Starting cluster consolidation analysis...")
+//
+// In dry-run mode (Options.Live=false, the default) it logs the plan and
+// returns without mutating anything.
+func NudgePods(ctx context.Context, clientset kubernetes.Interface, opts Options) error {
+	mode := "DRY-RUN"
+	if opts.Live {
+		mode = "LIVE"
+	}
+	log.Printf("Active Nudger (%s): Starting cluster consolidation analysis...", mode)
+
+	if opts.Live {
+		if halted, reason := nudgerHaltCheck(ctx, clientset, opts); halted {
+			log.Printf("Active Nudger: halt switch active (%s), refusing to cordon", reason)
+			return nil
+		}
+	}
 
 	// 1. Fetch all nodes
 	nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -223,6 +263,14 @@ func NudgePods(ctx context.Context, clientset kubernetes.Interface) error {
 		}
 
 		if allPodsFit {
+			// Check PDB constraints: every relocatable pod must currently
+			// have disruption budget headroom. If a matching PDB shows
+			// DisruptionsAllowed=0, evicting the pod would block and we
+			// would have cordoned a node for no gain.
+			if blocker := pdbBlocker(ctx, clientset, relocatable); blocker != "" {
+				log.Printf("Active Nudger: candidate node %q passes capacity check but PDB %q would block eviction; skipping.", candidate.name, blocker)
+				continue
+			}
 			targetNodeToEmpty = candidate
 			podsToEvict = relocatable
 			break
@@ -235,7 +283,16 @@ func NudgePods(ctx context.Context, clientset kubernetes.Interface) error {
 		return nil
 	}
 
-	log.Printf("Active Nudger: Found consolidation opportunity! Node %q can be emptied. Relocatable pods to nudge: %d\n", targetNodeToEmpty.name, len(podsToEvict))
+	log.Printf("Active Nudger (%s): Found consolidation opportunity. Node %q can be emptied. Relocatable pods to nudge: %d",
+		mode, targetNodeToEmpty.name, len(podsToEvict))
+
+	if !opts.Live {
+		for _, pod := range podsToEvict {
+			log.Printf("Active Nudger DRY-RUN: would evict pod %s/%s from node %q", pod.Namespace, pod.Name, targetNodeToEmpty.name)
+		}
+		log.Printf("Active Nudger DRY-RUN: would cordon node %q. Set CLUSTER_OPTIMIZER_NUDGE_LIVE=true to actually cordon and evict.", targetNodeToEmpty.name)
+		return nil
+	}
 
 	// 8. Cordon the node to prevent new pods from scheduling on it
 	nodeObj, err := clientset.CoreV1().Nodes().Get(ctx, targetNodeToEmpty.name, metav1.GetOptions{})
@@ -274,4 +331,67 @@ func NudgePods(ctx context.Context, clientset kubernetes.Interface) error {
 
 	log.Printf("Active Nudger: Consolidation of node %q initiated successfully.\n", targetNodeToEmpty.name)
 	return nil
+}
+
+// nudgerHaltCheck consults the same configmap the applier uses. Fail
+// closed: if we can't read it, refuse to cordon.
+func nudgerHaltCheck(ctx context.Context, clientset kubernetes.Interface, opts Options) (bool, string) {
+	cm, err := clientset.CoreV1().ConfigMaps(opts.HaltNamespace).Get(ctx, opts.HaltConfigMap, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, ""
+		}
+		return true, fmt.Sprintf("unreadable halt configmap: %v", err)
+	}
+	if cm.Data[opts.HaltKey] == "true" {
+		return true, "halt=true"
+	}
+	return false, ""
+}
+
+// pdbBlocker checks whether any pod-in-eviction-set would be blocked by a
+// matching PDB whose DisruptionsAllowed is currently 0. Returns the name of
+// the first blocking PDB, or "" if none would block.
+func pdbBlocker(ctx context.Context, clientset kubernetes.Interface, pods []corev1.Pod) string {
+	// Group pods by namespace so we don't list PDBs in namespaces we don't
+	// touch.
+	byNamespace := map[string][]corev1.Pod{}
+	for _, pod := range pods {
+		byNamespace[pod.Namespace] = append(byNamespace[pod.Namespace], pod)
+	}
+	for namespace, nsPods := range byNamespace {
+		pdbs, err := clientset.PolicyV1().PodDisruptionBudgets(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			// Be conservative: an error reading PDBs is treated as a
+			// blocker so we don't proceed without disruption-budget data.
+			return fmt.Sprintf("error listing PDBs in %s: %v", namespace, err)
+		}
+		for _, pdb := range pdbs.Items {
+			if pdb.Status.DisruptionsAllowed > 0 {
+				continue
+			}
+			selector := pdb.Spec.Selector
+			if selector == nil {
+				continue
+			}
+			for _, pod := range nsPods {
+				if labelsMatchSelector(pod.Labels, selector.MatchLabels) {
+					return pdb.Namespace + "/" + pdb.Name
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func labelsMatchSelector(podLabels, selector map[string]string) bool {
+	if len(selector) == 0 {
+		return false
+	}
+	for k, v := range selector {
+		if podLabels[k] != v {
+			return false
+		}
+	}
+	return true
 }

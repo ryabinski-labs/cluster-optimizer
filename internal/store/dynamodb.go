@@ -35,6 +35,35 @@ func NewDynamoDBWriter(ctx context.Context, table string) (*DynamoDBWriter, erro
 	return &DynamoDBWriter{table: table, client: dynamodb.NewFromConfig(cfg), ttlDays: ttlDays}, nil
 }
 
+// Occurrences returns a map of recommendation occurrence counts keyed by
+// "RuleID\x00Namespace\x00Workload" — the same format the planner uses.
+// Live applier uses this to verify multi-run evidence before mutating.
+// A query error returns an empty map rather than failing the whole run;
+// the planner treats a missing entry as "no evidence yet" and skips.
+func (w *DynamoDBWriter) Occurrences(ctx context.Context, clusterID string) (map[string]int64, error) {
+	recs, err := w.getRecommendations(ctx, clusterID)
+	if err != nil {
+		return map[string]int64{}, err
+	}
+	out := make(map[string]int64, len(recs))
+	for sk, item := range recs {
+		// sk format: "REC#" + RuleID + "\x00" + Namespace + "\x00" + Workload
+		// Strip the "REC#" prefix.
+		const prefix = "REC#"
+		if len(sk) < len(prefix) || sk[:len(prefix)] != prefix {
+			continue
+		}
+		key := sk[len(prefix):]
+		if occ, ok := item["occurrences"].(*types.AttributeValueMemberN); ok {
+			parsed, err := strconv.ParseInt(occ.Value, 10, 64)
+			if err == nil {
+				out[key] = parsed
+			}
+		}
+	}
+	return out, nil
+}
+
 func (w *DynamoDBWriter) getRecommendations(ctx context.Context, clusterID string) (map[string]map[string]types.AttributeValue, error) {
 	out, err := w.client.Query(ctx, &dynamodb.QueryInput{
 		TableName:              aws.String(w.table),

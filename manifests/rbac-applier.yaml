@@ -1,0 +1,66 @@
+# Optional RBAC for the live in-cluster auto-apply feature.
+#
+# DO NOT apply this manifest unless you have read the safety model in
+# internal/applier/applier.go and intend to let the optimizer mutate
+# workloads in the `default` namespace. The applier still defaults to
+# dry-run; this only grants the verbs it would need IF you opt in via both
+# `--auto-apply` and CLUSTER_OPTIMIZER_AUTOAPPLY=true.
+#
+# Blast radius is intentionally narrow:
+#   - patch verb only (no create, no delete, no update)
+#   - apps/deployments, apps/daemonsets, apps/statefulsets only
+#   - bound to the `default` namespace only (Role, not ClusterRole)
+#   - configmaps get on the cluster-optimizer namespace for the halt switch
+#
+# To revoke without removing the deployment: kubectl delete -f rbac-applier.yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cluster-optimizer-applier
+  namespace: default
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets"]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cluster-optimizer-applier
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cluster-optimizer-applier
+subjects:
+  - kind: ServiceAccount
+    name: cluster-optimizer
+    namespace: cluster-optimizer
+---
+# Read access to the halt ConfigMap. Bound to the cluster-optimizer
+# namespace, where the ConfigMap lives.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cluster-optimizer-halt-reader
+  namespace: cluster-optimizer
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["cluster-optimizer-halt"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cluster-optimizer-halt-reader
+  namespace: cluster-optimizer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cluster-optimizer-halt-reader
+subjects:
+  - kind: ServiceAccount
+    name: cluster-optimizer
+    namespace: cluster-optimizer

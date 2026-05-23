@@ -17,10 +17,15 @@ examples, optional DynamoDB persistence, and local UI are available, but the
 recommendation set is intentionally conservative and should be reviewed before
 changes are applied to production workloads.
 
+Live in-cluster remediation is available as an opt-in feature behind two
+independent switches (`--auto-apply` AND `CLUSTER_OPTIMIZER_AUTOAPPLY=true`).
+The default behaviour is unchanged: advisory findings only.
+
 ## Product Principles
 
-- Read-only by default. The tool recommends changes; it does not mutate
-  workloads, nodes, PDBs, HPAs, or cloud resources.
+- Read-only by default. Live mutation requires explicit opt-in via two
+  independent gates; everything else (advisory output, dry-run plans) is the
+  default.
 - Well-Architected guardrails. Every finding includes cost impact plus
   reliability, security, operational, performance, and sustainability context.
 - Evidence over guesses. Recommendations carry the observed usage, requests,
@@ -92,6 +97,67 @@ Trigger a one-off run:
 kubectl create job -n cluster-optimizer --from=cronjob/cluster-optimizer cluster-optimizer-manual
 kubectl logs -n cluster-optimizer job/cluster-optimizer-manual
 ```
+
+## Live Auto-Apply (opt-in)
+
+By default the optimizer is advisory and produces a dry-run plan. To let it
+actually mutate workload requests in-cluster you must:
+
+1. Apply the extra RBAC manifest (`manifests/rbac-applier.yaml`), which grants
+   only the `patch` verb on `apps/deployments`, `apps/daemonsets`, and
+   `apps/statefulsets` in the `default` namespace, plus a single-resource `get`
+   on the halt ConfigMap.
+2. Set `CLUSTER_OPTIMIZER_AUTOAPPLY=true` in the CronJob's environment.
+3. Pass `--auto-apply` in the container args.
+
+Both the env var and the flag must be present. Either alone keeps the
+applier in dry-run mode.
+
+The applier refuses to mutate when any of the following apply:
+- The workload is provider-managed (DOKS DaemonSets such as `kube-proxy`,
+  `cilium`, `csi-do-node`, `do-node-agent`, `coredns`, `metrics-server`,
+  `konnectivity-agent`, `hubble-relay`/`hubble-ui`, `cpc-bridge-proxy`,
+  `doks-telemetry-config-reloader`).
+- The finding is not in `config/remediation-targets.json` with that rule
+  listed in `supported_rules`.
+- The finding's confidence is below `high`.
+- The finding has not appeared in at least 3 consecutive runs (requires
+  DynamoDB persistence; the applier refuses without it).
+- A safe trim is not available within the 50% max-trim cap and 10m/32Mi
+  floor.
+- The halt ConfigMap (`cluster-optimizer/cluster-optimizer-halt`, key
+  `halt=true`) is set, or its read fails.
+
+### Halt switch
+
+Stop both the applier and the nudger from making any further changes without
+redeploying:
+
+```bash
+kubectl -n cluster-optimizer create configmap cluster-optimizer-halt \
+  --from-literal=halt=true \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Reverse with `halt=false` or by deleting the ConfigMap.
+
+### Nudger
+
+The nudger (`--nudge` / `CLUSTER_OPTIMIZER_NUDGE=true`) reports which node
+could be drained next. It is dry-run by default; set
+`CLUSTER_OPTIMIZER_NUDGE_LIVE=true` to actually cordon and evict. It checks
+the halt switch and aborts when any candidate eviction is blocked by a PDB
+with `DisruptionsAllowed=0`.
+
+### Recovery and operator runbook
+
+See [`docs/runbook.md`](docs/runbook.md) for:
+
+- Activating the halt switch.
+- Rolling back a single workload patch.
+- Uncordoning a node, suspending the CronJob, revoking applier RBAC.
+- "Did the optimizer cause this incident?" checklist.
+- The full list of things the optimizer will never do on its own.
 
 ## DynamoDB Persistence
 
