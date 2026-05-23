@@ -4,6 +4,8 @@ All notable changes to Cluster Optimizer will be documented in this file.
 
 ## Unreleased
 
+- Reduced DynamoDB call volume and fixed a class of "context deadline exceeded / failed to get rate limit token" errors by sharing a tuned `store.NewDynamoDBClient` (no-op retry rate limiter, explicit HTTP transport timeouts), projecting only the attributes needed for `Occurrences`, paginating `REC#` queries (previously silently truncated at the 1 MB Query page), batching finding writes via `BatchWriteItem` (25 per request) instead of per-finding `PutItem`, and dropping the second `Query` inside `PutReport` by accepting the caller's existing-recommendation map.
+- Added a short-TTL in-memory cache for `cluster-optimizer-ui` reports + rollups (configurable via `--cache-ttl-seconds` / `REPORTS_CACHE_TTL_SECONDS`, default 30s) and a `--trend-report-cap` / `TREND_REPORT_CAP` cap (default 50) so dashboard polls do not repeatedly fan out to DynamoDB.
 - Clarified `scripts/verify-deployment.sh` output so it directly answers whether the latest published or requested image is deployed.
 - Added `provider_managed` and `remediable` fields to every analyzer finding so remediators can refuse to touch DOKS-reconciled DaemonSets (kube-proxy, cilium, csi-do-node, do-node-agent, doks-telemetry-config-reloader, konnectivity-agent, hubble-relay/ui, coredns, metrics-server, cpc-bridge-proxy) and so callers can tell at a glance which findings have a remediation target configured.
 - Added DaemonSet and StatefulSet support to `api-yml-remediator` for `memory-request-over-provisioned` and `cpu-request-over-provisioned` rules, with an explicit refusal to patch provider-managed workload names.
