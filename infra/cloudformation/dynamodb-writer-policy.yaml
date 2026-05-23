@@ -18,6 +18,7 @@ Resources:
           - Sid: WriteClusterOptimizerReports
             Effect: Allow
             Action:
+              - dynamodb:BatchWriteItem
               - dynamodb:DescribeTable
               - dynamodb:PutItem
               - dynamodb:Query
