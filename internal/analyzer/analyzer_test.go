@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GipsyChef/cluster-optimizer/internal/classifier"
 	"github.com/GipsyChef/cluster-optimizer/internal/model"
 )
 
@@ -219,6 +220,66 @@ func TestDetectsUnknownRuntimeModernizationCandidate(t *testing.T) {
 		}
 	}
 	t.Fatalf("unknown runtime modernization finding missing: %#v", report.Findings)
+}
+
+func TestAnalyzeWithTagsProviderManagedAndRemediable(t *testing.T) {
+	mem := int64(50)
+	snapshot := model.Snapshot{
+		ClusterID:  "default",
+		CapturedAt: time.Now(),
+		Nodes: []model.Node{
+			{Name: "n1", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+			{Name: "n2", AllocatableCPUm: 1900, AllocatableMemoryMiB: 3000},
+		},
+		Workloads: []model.Workload{
+			{
+				Namespace: "default", Name: "agentdraft-api", Kind: "Deployment", Replicas: 1,
+				Labels: map[string]string{"app": "agentdraft-api"}, Selector: map[string]string{"app": "agentdraft-api"},
+				RequestsCPUm: 100, RequestsMemoryMiB: 512, UsageMemoryMiB: &mem,
+			},
+			{
+				Namespace: "kube-system", Name: "kube-proxy", Kind: "DaemonSet", Replicas: 3,
+				Labels:       map[string]string{"k8s-app": "kube-proxy"},
+				Selector:     map[string]string{"k8s-app": "kube-proxy"},
+				RequestsCPUm: 100, RequestsMemoryMiB: 375, UsageMemoryMiB: &mem,
+			},
+		},
+	}
+	c := classifier.New("default", []classifier.Target{{
+		ClusterID:      "default",
+		Namespace:      "default",
+		Workload:       "Deployment/agentdraft-api",
+		Container:      "agentdraft-api",
+		SupportedRules: []string{"memory-request-over-provisioned"},
+	}})
+	report := AnalyzeWith(snapshot, c)
+	var sawUserRemediable, sawProviderManaged bool
+	for _, f := range report.Findings {
+		if f.RuleID == "memory-request-over-provisioned" && f.Workload == "Deployment/agentdraft-api" {
+			if f.ProviderManaged {
+				t.Fatalf("agentdraft-api must not be provider managed")
+			}
+			if !f.Remediable {
+				t.Fatalf("agentdraft-api memory finding should be remediable, got %#v", f)
+			}
+			sawUserRemediable = true
+		}
+		if f.Workload == "DaemonSet/kube-proxy" {
+			if !f.ProviderManaged {
+				t.Fatalf("kube-proxy finding must be provider managed")
+			}
+			if f.Remediable {
+				t.Fatalf("kube-proxy finding must not be remediable, got %#v", f)
+			}
+			sawProviderManaged = true
+		}
+	}
+	if !sawUserRemediable {
+		t.Fatalf("expected a remediable agentdraft-api finding; got %#v", report.Findings)
+	}
+	if !sawProviderManaged {
+		t.Fatalf("expected a provider-managed kube-proxy finding; got %#v", report.Findings)
+	}
 }
 
 func TestDetectsFixedReplicaWithoutAutoscaler(t *testing.T) {

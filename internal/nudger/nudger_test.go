@@ -4,11 +4,20 @@ import (
 	"context"
 	"testing"
 
+	policyv1 "k8s.io/api/policy/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
+
+// liveOpts returns an Options that flips the dry-run gate off so existing
+// cordon+evict assertions keep working.
+func liveOpts() Options {
+	opts := NewOptions()
+	opts.Live = true
+	return opts
+}
 
 func TestNudgePods_Feasible(t *testing.T) {
 	// Create fake nodes
@@ -72,7 +81,7 @@ func TestNudgePods_Feasible(t *testing.T) {
 	clientset := fake.NewSimpleClientset(node1, node2, pod1)
 
 	// Run NudgePods
-	err := NudgePods(context.Background(), clientset)
+	err := NudgePods(context.Background(), clientset, liveOpts())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -203,7 +212,7 @@ func TestNudgePods_NotFeasible(t *testing.T) {
 
 	clientset := fake.NewSimpleClientset(node1, node2, pod1, pod2)
 
-	err := NudgePods(context.Background(), clientset)
+	err := NudgePods(context.Background(), clientset, liveOpts())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -304,7 +313,7 @@ func TestNudgePods_SkipBareAndDaemonSetPods(t *testing.T) {
 
 	clientset := fake.NewSimpleClientset(node1, node2, dsPod, barePod)
 
-	err := NudgePods(context.Background(), clientset)
+	err := NudgePods(context.Background(), clientset, liveOpts())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -316,5 +325,136 @@ func TestNudgePods_SkipBareAndDaemonSetPods(t *testing.T) {
 	}
 	if updatedNode1.Spec.Unschedulable {
 		t.Error("expected node-1 to NOT be cordoned because no relocatable pods were found")
+	}
+}
+
+func TestNudgePods_DryRunDoesNotCordon(t *testing.T) {
+	node1 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("2"),
+			corev1.ResourceMemory: resource.MustParse("4Gi"),
+		}},
+	}
+	node2 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
+		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("2"),
+			corev1.ResourceMemory: resource.MustParse("4Gi"),
+		}},
+	}
+	isController := true
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "web-pod", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "web-rs", Controller: &isController}},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{{Name: "app", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("512Mi"),
+			}}}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	clientset := fake.NewSimpleClientset(node1, node2, pod)
+	// Default opts: dry-run (Live=false).
+	if err := NudgePods(context.Background(), clientset, NewOptions()); err != nil {
+		t.Fatalf("dry-run nudge errored: %v", err)
+	}
+	updated, _ := clientset.CoreV1().Nodes().Get(context.Background(), "node-1", metav1.GetOptions{})
+	if updated.Spec.Unschedulable {
+		t.Fatal("dry-run nudge must not cordon node-1")
+	}
+	for _, action := range clientset.Actions() {
+		if action.GetVerb() == "create" && action.GetSubresource() == "eviction" {
+			t.Fatal("dry-run nudge must not issue eviction")
+		}
+		if action.GetVerb() == "update" && action.GetResource().Resource == "nodes" {
+			t.Fatal("dry-run nudge must not update nodes")
+		}
+	}
+}
+
+func TestNudgePods_HaltSwitchAborts(t *testing.T) {
+	node1 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
+		}},
+	}
+	node2 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
+		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
+		}},
+	}
+	isController := true
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "web-pod", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "web-rs", Controller: &isController}},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{{Name: "app", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("512Mi"),
+			}}}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	halt := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-optimizer-halt", Namespace: "cluster-optimizer"},
+		Data:       map[string]string{"halt": "true"},
+	}
+	clientset := fake.NewSimpleClientset(node1, node2, pod, halt)
+	if err := NudgePods(context.Background(), clientset, liveOpts()); err != nil {
+		t.Fatalf("nudger should return cleanly when halted: %v", err)
+	}
+	updated, _ := clientset.CoreV1().Nodes().Get(context.Background(), "node-1", metav1.GetOptions{})
+	if updated.Spec.Unschedulable {
+		t.Fatal("halt switch must prevent cordon")
+	}
+}
+
+func TestNudgePods_SkipsWhenPDBWouldBlock(t *testing.T) {
+	node1 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
+		}},
+	}
+	node2 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
+		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
+		}},
+	}
+	isController := true
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "web-pod", Namespace: "default", Labels: map[string]string{"app": "web"},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "web-rs", Controller: &isController}},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{{Name: "app", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("512Mi"),
+			}}}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	pdb := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-pdb", Namespace: "default"},
+		Spec:       policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}},
+		Status:     policyv1.PodDisruptionBudgetStatus{DisruptionsAllowed: 0},
+	}
+	clientset := fake.NewSimpleClientset(node1, node2, pod, pdb)
+	if err := NudgePods(context.Background(), clientset, liveOpts()); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	updated, _ := clientset.CoreV1().Nodes().Get(context.Background(), "node-1", metav1.GetOptions{})
+	if updated.Spec.Unschedulable {
+		t.Fatal("PDB should have blocked consolidation; node should not be cordoned")
 	}
 }
