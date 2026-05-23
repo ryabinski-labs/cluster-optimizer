@@ -16,9 +16,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GipsyChef/cluster-optimizer/internal/analyzer"
+	"github.com/GipsyChef/cluster-optimizer/internal/store"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -142,6 +144,25 @@ type server struct {
 	githubWorkflow     string
 	rewriteWorkflow    string
 	githubRef          string
+
+	// trendReportCap bounds how many recent REPORT# items we pull from
+	// DynamoDB to build trend/rollup data. Each report carries a full
+	// embedded JSON payload, so a smaller cap directly shrinks the response
+	// body the SDK has to deserialize within the request timeout.
+	trendReportCap int32
+
+	// cacheTTL controls how long the per-cluster reports + rollups response
+	// is reused across UI polls. Set to 0 to disable the cache.
+	cacheTTL time.Duration
+
+	cacheMu sync.Mutex
+	cache   map[string]*reportsCacheEntry
+}
+
+type reportsCacheEntry struct {
+	expiresAt time.Time
+	reports   []reportRecord
+	rollups   map[string]recommendationRollup
 }
 
 func main() {
@@ -160,6 +181,8 @@ func run(ctx context.Context, args []string) error {
 	var rewriteWorkflow string
 	var githubRef string
 	var minRemediationDays int
+	var trendReportCap int
+	var cacheTTLSeconds int
 	flags := flag.NewFlagSet("cluster-optimizer-ui", flag.ContinueOnError)
 	flags.StringVar(&addr, "addr", envOr("CLUSTER_OPTIMIZER_UI_ADDR", "127.0.0.1:8088"), "listen address")
 	flags.StringVar(&table, "table", envOr("DYNAMODB_TABLE", "cluster-optimizer-reports"), "DynamoDB table")
@@ -170,11 +193,13 @@ func run(ctx context.Context, args []string) error {
 	flags.StringVar(&githubWorkflow, "github-workflow", envOr("REMEDIATION_WORKFLOW", "remediate-api-yml.yml"), "GitHub Actions workflow file to dispatch")
 	flags.StringVar(&rewriteWorkflow, "rewrite-workflow", envOr("REWRITE_PLAN_WORKFLOW", "generate-rewrite-instructions.yml"), "GitHub Actions workflow file that creates coding-agent rewrite instructions")
 	flags.StringVar(&githubRef, "github-ref", envOr("REMEDIATION_WORKFLOW_REF", "main"), "Git ref for workflow_dispatch")
+	flags.IntVar(&trendReportCap, "trend-report-cap", envIntOr("TREND_REPORT_CAP", 50), "max recent reports fetched from DynamoDB to build trend/rollups")
+	flags.IntVar(&cacheTTLSeconds, "cache-ttl-seconds", envIntOr("REPORTS_CACHE_TTL_SECONDS", 30), "in-memory TTL for reports+rollups responses (0 disables the cache)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	client, err := store.NewDynamoDBClient(ctx, config.WithRegion(region))
 	if err != nil {
 		return fmt.Errorf("load AWS config: %w", err)
 	}
@@ -186,10 +211,16 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		log.Printf("remediation targets disabled: %v", err)
 	}
+	if trendReportCap < 1 {
+		trendReportCap = 1
+	}
+	if trendReportCap > 200 {
+		trendReportCap = 200
+	}
 	srv := &server{
 		table:              table,
 		region:             region,
-		client:             dynamodb.NewFromConfig(cfg),
+		client:             client,
 		static:             http.FileServer(http.FS(staticRoot)),
 		remediationTargets: targets,
 		minRemediationDays: minRemediationDays,
@@ -197,6 +228,9 @@ func run(ctx context.Context, args []string) error {
 		githubWorkflow:     githubWorkflow,
 		rewriteWorkflow:    rewriteWorkflow,
 		githubRef:          githubRef,
+		trendReportCap:     int32(trendReportCap),
+		cacheTTL:           time.Duration(cacheTTLSeconds) * time.Second,
+		cache:              map[string]*reportsCacheEntry{},
 	}
 
 	mux := http.NewServeMux()
@@ -216,7 +250,7 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleReports(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
 	clusterID := r.URL.Query().Get("cluster_id")
@@ -233,7 +267,7 @@ func (s *server) handleReports(w http.ResponseWriter, r *http.Request) {
 		limit = int32(value)
 	}
 
-	allReports, err := s.queryReports(ctx, clusterID, 100)
+	allReports, rollups, err := s.reportsAndRollups(ctx, clusterID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -249,7 +283,7 @@ func (s *server) handleReports(w http.ResponseWriter, r *http.Request) {
 		Table:     s.table,
 		Region:    s.region,
 		Reports:   reports,
-		Trend:     s.buildTrend(ctx, allReports),
+		Trend:     s.buildTrend(allReports, rollups),
 	})
 }
 
@@ -273,12 +307,11 @@ func (s *server) handleRemediation(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	reports, err := s.queryReports(ctx, req.ClusterID, 100)
+	_, rollups, err := s.reportsAndRollups(ctx, req.ClusterID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	rollups := s.rollups(ctx, reports)
 	rollup, ok := rollups[findingKey(req.RuleID, req.Namespace, req.Workload)]
 	if !ok {
 		writeError(w, http.StatusNotFound, "recommendation was not found in recent reports")
@@ -315,16 +348,15 @@ func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
 	workload := r.URL.Query().Get("workload")
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	reports, err := s.queryReports(ctx, clusterID, 100)
+	_, rollups, err := s.reportsAndRollups(ctx, clusterID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 
-	rollups := s.rollups(ctx, reports)
 	rollup, ok := rollups[findingKey(ruleID, namespace, workload)]
 	if !ok {
 		writeError(w, http.StatusNotFound, "recommendation not found")
@@ -512,6 +544,40 @@ func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(b.String()))
 }
 
+// reportsAndRollups returns the latest reports + computed rollups for a
+// cluster, reusing a short-lived in-memory cache when configured. The cache
+// absorbs the cost of repeated dashboard polls — each invocation would
+// otherwise issue at least two DynamoDB Queries (REPORT#... and REC#...)
+// each carrying multi-KB JSON payloads.
+func (s *server) reportsAndRollups(ctx context.Context, clusterID string) ([]reportRecord, map[string]recommendationRollup, error) {
+	if s.cacheTTL > 0 {
+		s.cacheMu.Lock()
+		if entry, ok := s.cache[clusterID]; ok && time.Now().Before(entry.expiresAt) {
+			reports, rollups := entry.reports, entry.rollups
+			s.cacheMu.Unlock()
+			return reports, rollups, nil
+		}
+		s.cacheMu.Unlock()
+	}
+
+	reports, err := s.queryReports(ctx, clusterID, s.trendReportCap)
+	if err != nil {
+		return nil, nil, err
+	}
+	rollups := s.rollups(ctx, reports)
+
+	if s.cacheTTL > 0 {
+		s.cacheMu.Lock()
+		s.cache[clusterID] = &reportsCacheEntry{
+			expiresAt: time.Now().Add(s.cacheTTL),
+			reports:   reports,
+			rollups:   rollups,
+		}
+		s.cacheMu.Unlock()
+	}
+	return reports, rollups, nil
+}
+
 func (s *server) queryReports(ctx context.Context, clusterID string, limit int32) ([]reportRecord, error) {
 	var reports []reportRecord
 	var lastEvaluatedKey map[string]types.AttributeValue
@@ -568,7 +634,7 @@ func decodeReport(item map[string]types.AttributeValue) (reportRecord, error) {
 	}, nil
 }
 
-func (s *server) buildTrend(ctx context.Context, reports []reportRecord) trendResponse {
+func (s *server) buildTrend(reports []reportRecord, rollups map[string]recommendationRollup) trendResponse {
 	series := make([]trendPoint, 0, len(reports))
 	for i := len(reports) - 1; i >= 0; i-- {
 		report := reports[i]
@@ -595,7 +661,6 @@ func (s *server) buildTrend(ctx context.Context, reports []reportRecord) trendRe
 			TwoNodeFeasible:    twoNodeFeasible(report.Summary),
 		})
 	}
-	rollups := s.rollups(ctx, reports)
 	top := make([]recommendationRollup, 0, len(rollups))
 	for _, rollup := range rollups {
 		top = append(top, rollup)
@@ -639,55 +704,64 @@ func intAttr(item map[string]types.AttributeValue, key string) int64 {
 }
 
 func (s *server) loadRecommendations(ctx context.Context, clusterID string) (map[string]recommendationRollup, error) {
-	out, err := s.client.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String(s.table),
-		KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :sk_prefix)"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk":        &types.AttributeValueMemberS{Value: "CLUSTER#" + clusterID},
-			":sk_prefix": &types.AttributeValueMemberS{Value: "REC#"},
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	recs := make(map[string]recommendationRollup)
-	for _, item := range out.Items {
-		skVal := strAttr(item, "sk")
-		if !strings.HasPrefix(skVal, "REC#") {
-			continue
-		}
-		key := strings.TrimPrefix(skVal, "REC#")
-
-		firstSeenStr := strAttr(item, "first_seen_at")
-		lastSeenStr := strAttr(item, "last_seen_at")
-		var firstSeenAt, lastSeenAt time.Time
-		if t, err := time.Parse(time.RFC3339, firstSeenStr); err == nil {
-			firstSeenAt = t
-		}
-		if t, err := time.Parse(time.RFC3339, lastSeenStr); err == nil {
-			lastSeenAt = t
+	var lastEvaluatedKey map[string]types.AttributeValue
+	for {
+		out, err := s.client.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String(s.table),
+			KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :sk_prefix)"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":pk":        &types.AttributeValueMemberS{Value: "CLUSTER#" + clusterID},
+				":sk_prefix": &types.AttributeValueMemberS{Value: "REC#"},
+			},
+			ExclusiveStartKey: lastEvaluatedKey,
+		})
+		if err != nil {
+			return nil, err
 		}
 
-		occurrences := intAttr(item, "occurrences")
+		for _, item := range out.Items {
+			skVal := strAttr(item, "sk")
+			if !strings.HasPrefix(skVal, "REC#") {
+				continue
+			}
+			key := strings.TrimPrefix(skVal, "REC#")
 
-		var latest analyzer.Finding
-		if rawFinding, ok := item["latest_finding_json"].(*types.AttributeValueMemberS); ok {
-			_ = json.Unmarshal([]byte(rawFinding.Value), &latest)
+			firstSeenStr := strAttr(item, "first_seen_at")
+			lastSeenStr := strAttr(item, "last_seen_at")
+			var firstSeenAt, lastSeenAt time.Time
+			if t, err := time.Parse(time.RFC3339, firstSeenStr); err == nil {
+				firstSeenAt = t
+			}
+			if t, err := time.Parse(time.RFC3339, lastSeenStr); err == nil {
+				lastSeenAt = t
+			}
+
+			occurrences := intAttr(item, "occurrences")
+
+			var latest analyzer.Finding
+			if rawFinding, ok := item["latest_finding_json"].(*types.AttributeValueMemberS); ok {
+				_ = json.Unmarshal([]byte(rawFinding.Value), &latest)
+			}
+
+			recs[key] = recommendationRollup{
+				Key:          key,
+				RuleID:       strAttr(item, "rule_id"),
+				Severity:     strAttr(item, "severity"),
+				Namespace:    strAttr(item, "namespace"),
+				Workload:     strAttr(item, "workload"),
+				FirstSeenAt:  firstSeenAt,
+				LastSeenAt:   lastSeenAt,
+				Occurrences:  int(occurrences),
+				Latest:       latest,
+				ObservedDays: daysBetweenInclusive(firstSeenAt, lastSeenAt),
+			}
 		}
 
-		recs[key] = recommendationRollup{
-			Key:          key,
-			RuleID:       strAttr(item, "rule_id"),
-			Severity:     strAttr(item, "severity"),
-			Namespace:    strAttr(item, "namespace"),
-			Workload:     strAttr(item, "workload"),
-			FirstSeenAt:  firstSeenAt,
-			LastSeenAt:   lastSeenAt,
-			Occurrences:  int(occurrences),
-			Latest:       latest,
-			ObservedDays: daysBetweenInclusive(firstSeenAt, lastSeenAt),
+		if out.LastEvaluatedKey == nil {
+			break
 		}
+		lastEvaluatedKey = out.LastEvaluatedKey
 	}
 	return recs, nil
 }

@@ -66,10 +66,15 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		// Fetch occurrences BEFORE the planner runs so PutReport's bump
-		// doesn't inflate this run's count.
-		occurrences, _ = writer.Occurrences(ctx, clusterID)
-		if err := writer.PutReport(ctx, report); err != nil {
+		// Fetch existing recs BEFORE the planner runs so PutReport's bump
+		// doesn't inflate this run's count, and hand the same map to
+		// PutReport so it doesn't re-Query for first_seen_at / occurrences.
+		existing, _ := writer.ExistingRecommendations(ctx, clusterID)
+		occurrences = make(map[string]int64, len(existing))
+		for key, rec := range existing {
+			occurrences[key] = rec.Occurrences
+		}
+		if err := writer.PutReport(ctx, report, existing); err != nil {
 			return err
 		}
 	}
