@@ -38,6 +38,21 @@ func NewOptions() Options {
 	}
 }
 
+// Result summarises one NudgePods run for downstream persistence (the
+// remediation audit log). It is deliberately compact — the verbose per-pod
+// detail stays in logs. Mode is "live" or "dry-run"; an empty TargetNode
+// means no consolidation was feasible.
+type Result struct {
+	Mode              string
+	Halted            bool
+	HaltReason        string
+	TargetNode        string
+	RelocatablePods   int
+	Evicted           int
+	EvictionErrors    int
+	NotFeasibleReason string
+}
+
 // NudgePods scans the cluster nodes and active pods, determines if any node's
 // workloads can be fully consolidated/packed onto the remaining schedulable nodes,
 // and if so, cordons the candidate node and evicts its pods.
@@ -45,6 +60,18 @@ func NewOptions() Options {
 // In dry-run mode (Options.Live=false, the default) it logs the plan and
 // returns without mutating anything.
 func NudgePods(ctx context.Context, clientset kubernetes.Interface, opts Options) error {
+	_, err := NudgePodsWithResult(ctx, clientset, opts)
+	return err
+}
+
+// NudgePodsWithResult is the same as NudgePods but also returns a Result
+// describing what happened (or would have happened in dry-run). The
+// remediation audit log consumes this so the UI can show recent activity.
+func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, opts Options) (Result, error) {
+	result := Result{Mode: "dry-run"}
+	if opts.Live {
+		result.Mode = "live"
+	}
 	mode := "DRY-RUN"
 	if opts.Live {
 		mode = "LIVE"
@@ -54,24 +81,27 @@ func NudgePods(ctx context.Context, clientset kubernetes.Interface, opts Options
 	if opts.Live {
 		if halted, reason := nudgerHaltCheck(ctx, clientset, opts); halted {
 			log.Printf("Active Nudger: halt switch active (%s), refusing to cordon", reason)
-			return nil
+			result.Halted = true
+			result.HaltReason = reason
+			return result, nil
 		}
 	}
 
 	// 1. Fetch all nodes
 	nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to list nodes: %w", err)
+		return result, fmt.Errorf("failed to list nodes: %w", err)
 	}
 	if len(nodeList.Items) < 2 {
 		log.Println("Active Nudger: Cluster has fewer than 2 nodes. Consolidation not possible.")
-		return nil
+		result.NotFeasibleReason = "cluster has fewer than 2 nodes"
+		return result, nil
 	}
 
 	// 2. Fetch all pods across all namespaces
 	podList, err := clientset.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to list pods: %w", err)
+		return result, fmt.Errorf("failed to list pods: %w", err)
 	}
 
 	// 3. Define helper structures to model node capacity and resource request tracking
@@ -182,7 +212,8 @@ func NudgePods(ctx context.Context, clientset kubernetes.Interface, opts Options
 
 	if len(candidateNodes) < 2 {
 		log.Println("Active Nudger: Less than 2 schedulable nodes. Consolidation not possible.")
-		return nil
+		result.NotFeasibleReason = "fewer than 2 schedulable nodes"
+		return result, nil
 	}
 
 	// Sort candidate nodes by total requested resources (ascending) so we try to empty the least-loaded nodes first.
@@ -280,8 +311,12 @@ func NudgePods(ctx context.Context, clientset kubernetes.Interface, opts Options
 	// 7. If no node can be consolidated, log and return
 	if targetNodeToEmpty == nil {
 		log.Println("Active Nudger: No node consolidation is currently feasible. All nodes are packed or have non-relocatable workloads.")
-		return nil
+		result.NotFeasibleReason = "no node consolidation is currently feasible"
+		return result, nil
 	}
+
+	result.TargetNode = targetNodeToEmpty.name
+	result.RelocatablePods = len(podsToEvict)
 
 	log.Printf("Active Nudger (%s): Found consolidation opportunity. Node %q can be emptied. Relocatable pods to nudge: %d",
 		mode, targetNodeToEmpty.name, len(podsToEvict))
@@ -291,13 +326,13 @@ func NudgePods(ctx context.Context, clientset kubernetes.Interface, opts Options
 			log.Printf("Active Nudger DRY-RUN: would evict pod %s/%s from node %q", pod.Namespace, pod.Name, targetNodeToEmpty.name)
 		}
 		log.Printf("Active Nudger DRY-RUN: would cordon node %q. Set CLUSTER_OPTIMIZER_NUDGE_LIVE=true to actually cordon and evict.", targetNodeToEmpty.name)
-		return nil
+		return result, nil
 	}
 
 	// 8. Cordon the node to prevent new pods from scheduling on it
 	nodeObj, err := clientset.CoreV1().Nodes().Get(ctx, targetNodeToEmpty.name, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to get node %q for cordoning: %w", targetNodeToEmpty.name, err)
+		return result, fmt.Errorf("failed to get node %q for cordoning: %w", targetNodeToEmpty.name, err)
 	}
 
 	if !nodeObj.Spec.Unschedulable {
@@ -305,7 +340,7 @@ func NudgePods(ctx context.Context, clientset kubernetes.Interface, opts Options
 		nodeObj.Spec.Unschedulable = true
 		_, err = clientset.CoreV1().Nodes().Update(ctx, nodeObj, metav1.UpdateOptions{})
 		if err != nil {
-			return fmt.Errorf("failed to cordon node %q: %w", targetNodeToEmpty.name, err)
+			return result, fmt.Errorf("failed to cordon node %q: %w", targetNodeToEmpty.name, err)
 		}
 		log.Printf("Active Nudger: Node %q cordoned successfully.\n", targetNodeToEmpty.name)
 	} else {
@@ -324,13 +359,15 @@ func NudgePods(ctx context.Context, clientset kubernetes.Interface, opts Options
 		err := clientset.CoreV1().Pods(pod.Namespace).Evict(ctx, eviction)
 		if err != nil {
 			log.Printf("Active Nudger: WARNING: Failed to evict pod %s/%s: %v\n", pod.Namespace, pod.Name, err)
+			result.EvictionErrors++
 		} else {
 			log.Printf("Active Nudger: Pod %s/%s evicted successfully.\n", pod.Namespace, pod.Name)
+			result.Evicted++
 		}
 	}
 
 	log.Printf("Active Nudger: Consolidation of node %q initiated successfully.\n", targetNodeToEmpty.name)
-	return nil
+	return result, nil
 }
 
 // nudgerHaltCheck consults the same configmap the applier uses. Fail

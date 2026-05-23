@@ -37,6 +37,57 @@ type ExistingRecommendation struct {
 	Occurrences int64
 }
 
+// RemediationEvent is one row in the active-remediation audit log. It records
+// what the applier or nudger did (or would have done in dry-run) so the UI
+// can show operators that the engine is alive and what it touched.
+//
+// Mode is "live" or "dry-run". Kind is "patch_request" (applier) or
+// "cordon_evict" (nudger). Applied is true only when a live mutation
+// completed successfully; Error carries the message when it failed. For
+// nudger events Container is empty, BeforeCPUm/AfterCPUm/BeforeMemMiB/
+// AfterMemMiB are zero, and TargetNode/Evicted/EvictionErrors describe the
+// consolidation outcome.
+type RemediationEvent struct {
+	Timestamp       time.Time `json:"timestamp"`
+	Mode            string    `json:"mode"`
+	Kind            string    `json:"kind"`
+	Namespace       string    `json:"namespace,omitempty"`
+	Workload        string    `json:"workload,omitempty"`
+	WorkloadKind    string    `json:"workload_kind,omitempty"`
+	Container       string    `json:"container,omitempty"`
+	RuleID          string    `json:"rule_id,omitempty"`
+	BeforeCPUm      int64     `json:"before_cpu_m,omitempty"`
+	AfterCPUm       int64     `json:"after_cpu_m,omitempty"`
+	BeforeMemMiB    int64     `json:"before_memory_mib,omitempty"`
+	AfterMemMiB     int64     `json:"after_memory_mib,omitempty"`
+	Applied         bool      `json:"applied"`
+	Reason          string    `json:"reason,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	HaltActive      bool      `json:"halt_active,omitempty"`
+	TargetNode      string    `json:"target_node,omitempty"`
+	Evicted         int       `json:"evicted,omitempty"`
+	EvictionErrors  int       `json:"eviction_errors,omitempty"`
+	OccurrenceCount int64     `json:"occurrence_count,omitempty"`
+}
+
+// EngineStatus is the single sentinel item that records the most recent
+// posture of the remediation engine for a cluster. The UI reads it to render
+// the engine-status strip (mode, halt switch, last-run summary) without
+// scanning the event feed.
+type EngineStatus struct {
+	AutoApplyEnabled bool      `json:"auto_apply_enabled"`
+	AutoApplyLive    bool      `json:"auto_apply_live"`
+	NudgeEnabled     bool      `json:"nudge_enabled"`
+	NudgeLive        bool      `json:"nudge_live"`
+	HaltActive       bool      `json:"halt_active"`
+	HaltReason       string    `json:"halt_reason,omitempty"`
+	LastRunAt        time.Time `json:"last_run_at"`
+	LastRunActions   int       `json:"last_run_actions"`
+	LastRunApplied   int       `json:"last_run_applied"`
+	LastRunErrors    int       `json:"last_run_errors"`
+	LastClusterID    string    `json:"last_cluster_id,omitempty"`
+}
+
 // NewDynamoDBClient builds a DynamoDB client tuned for this project's usage
 // pattern: short-lived advisory runs and a polling UI where a single stalled
 // request would otherwise block waiting on the SDK's retry token bucket past
@@ -255,6 +306,147 @@ func (w *DynamoDBWriter) PutReport(ctx context.Context, report analyzer.Report, 
 	}
 
 	return w.batchWrite(ctx, requests)
+}
+
+// LoadEngineStatus fetches the sentinel ENGINE_STATUS row for clusterID.
+// Returns (nil, nil) when no row exists yet (cluster has never run the
+// remediation engine), which the UI shows as "no remediation activity yet".
+func LoadEngineStatus(ctx context.Context, client *dynamodb.Client, table, clusterID string) (*EngineStatus, error) {
+	out, err := client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(table),
+		Key: map[string]types.AttributeValue{
+			"pk": &types.AttributeValueMemberS{Value: "CLUSTER#" + clusterID},
+			"sk": &types.AttributeValueMemberS{Value: "ENGINE_STATUS"},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(out.Item) == 0 {
+		return nil, nil
+	}
+	raw, ok := out.Item["status_json"].(*types.AttributeValueMemberS)
+	if !ok || strings.TrimSpace(raw.Value) == "" {
+		return nil, nil
+	}
+	var status EngineStatus
+	if err := json.Unmarshal([]byte(raw.Value), &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
+// LoadRemediations returns RemediationEvents for clusterID newer than `since`,
+// capped at limit, newest first. A zero `since` returns the full TTL window.
+// A non-positive limit defaults to 100.
+func LoadRemediations(ctx context.Context, client *dynamodb.Client, table, clusterID string, since time.Time, limit int) ([]RemediationEvent, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	events := make([]RemediationEvent, 0, limit)
+	var lastEvaluatedKey map[string]types.AttributeValue
+	for len(events) < limit {
+		input := &dynamodb.QueryInput{
+			TableName:              aws.String(table),
+			KeyConditionExpression: aws.String("pk = :pk AND begins_with(sk, :sk_prefix)"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":pk":        &types.AttributeValueMemberS{Value: "CLUSTER#" + clusterID},
+				":sk_prefix": &types.AttributeValueMemberS{Value: "REMEDIATION#"},
+			},
+			ScanIndexForward:  aws.Bool(false),
+			Limit:             aws.Int32(int32(limit - len(events))),
+			ExclusiveStartKey: lastEvaluatedKey,
+		}
+		page, err := client.Query(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page.Items {
+			raw, ok := item["event_json"].(*types.AttributeValueMemberS)
+			if !ok || strings.TrimSpace(raw.Value) == "" {
+				continue
+			}
+			var event RemediationEvent
+			if err := json.Unmarshal([]byte(raw.Value), &event); err != nil {
+				continue
+			}
+			if !since.IsZero() && event.Timestamp.Before(since) {
+				return events, nil
+			}
+			events = append(events, event)
+			if len(events) >= limit {
+				return events, nil
+			}
+		}
+		if page.LastEvaluatedKey == nil {
+			break
+		}
+		lastEvaluatedKey = page.LastEvaluatedKey
+	}
+	return events, nil
+}
+
+// PutRemediations persists a batch of RemediationEvents under the cluster
+// partition. Sort key format: `REMEDIATION#<RFC3339Nano>#<seq>` so events
+// from the same run keep deterministic order and a descending scan returns
+// newest first. TTL matches REPORT# items.
+//
+// Best-effort by design: callers should log+continue on error so a failing
+// audit log never aborts a remediation run.
+func (w *DynamoDBWriter) PutRemediations(ctx context.Context, clusterID string, events []RemediationEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	requests := make([]types.WriteRequest, 0, len(events))
+	for i, event := range events {
+		ts := event.Timestamp
+		if ts.IsZero() {
+			ts = time.Now().UTC()
+		}
+		expiresAt := ts.Add(time.Duration(w.ttlDays) * 24 * time.Hour).Unix()
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		sk := "REMEDIATION#" + ts.UTC().Format(time.RFC3339Nano) + "#" + strconv.Itoa(i)
+		item := map[string]types.AttributeValue{
+			"pk":         &types.AttributeValueMemberS{Value: "CLUSTER#" + clusterID},
+			"sk":         &types.AttributeValueMemberS{Value: sk},
+			"timestamp":  &types.AttributeValueMemberS{Value: ts.UTC().Format(time.RFC3339Nano)},
+			"mode":       &types.AttributeValueMemberS{Value: event.Mode},
+			"kind":       &types.AttributeValueMemberS{Value: event.Kind},
+			"event_json": &types.AttributeValueMemberS{Value: string(payload)},
+			"expires_at": &types.AttributeValueMemberN{Value: strconv.FormatInt(expiresAt, 10)},
+		}
+		requests = append(requests, types.WriteRequest{PutRequest: &types.PutRequest{Item: item}})
+	}
+	return w.batchWrite(ctx, requests)
+}
+
+// PutEngineStatus overwrites the sentinel ENGINE_STATUS item for clusterID.
+// One row per cluster — last writer wins. Cheap and idempotent.
+func (w *DynamoDBWriter) PutEngineStatus(ctx context.Context, clusterID string, status EngineStatus) error {
+	ts := status.LastRunAt
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+		status.LastRunAt = ts
+	}
+	payload, err := json.Marshal(status)
+	if err != nil {
+		return err
+	}
+	expiresAt := ts.Add(time.Duration(w.ttlDays) * 24 * time.Hour).Unix()
+	_, err = w.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(w.table),
+		Item: map[string]types.AttributeValue{
+			"pk":          &types.AttributeValueMemberS{Value: "CLUSTER#" + clusterID},
+			"sk":          &types.AttributeValueMemberS{Value: "ENGINE_STATUS"},
+			"status_json": &types.AttributeValueMemberS{Value: string(payload)},
+			"updated_at":  &types.AttributeValueMemberS{Value: ts.UTC().Format(time.RFC3339Nano)},
+			"expires_at":  &types.AttributeValueMemberN{Value: strconv.FormatInt(expiresAt, 10)},
+		},
+	})
+	return err
 }
 
 // batchWrite drains requests in chunks of 25 and re-submits any
