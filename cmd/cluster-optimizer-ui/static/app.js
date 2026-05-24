@@ -7,6 +7,9 @@ const state = {
   activityFilter: "all",
   activityCollapsed: false,
   activityCollapsedByUser: false,
+  activitySkipsInline: false,
+  activitySkipsExpanded: {},
+  activityLoadedAt: null,
   reportsLoading: false,
   haltPosting: false,
   haltError: ""
@@ -70,7 +73,10 @@ const els = {
   engineModeDetails: document.querySelector("#engineModeDetails"),
   activityPanel: document.querySelector("#activityPanel"),
   activityList: document.querySelector("#activityList"),
-  activityToggle: document.querySelector("#activityToggle")
+  activityToggle: document.querySelector("#activityToggle"),
+  activitySkipsInline: document.querySelector("#activitySkipsInline"),
+  activityLive: document.querySelector("#activityLive"),
+  activityLiveText: document.querySelector("#activityLiveText")
 };
 
 document.querySelectorAll("[data-severity]").forEach((button) => {
@@ -158,6 +164,12 @@ els.activityToggle.addEventListener("click", () => {
   applyActivityCollapse();
 });
 
+els.activitySkipsInline.addEventListener("change", () => {
+  state.activitySkipsInline = els.activitySkipsInline.checked;
+  state.activitySkipsExpanded = {};
+  renderActivity();
+});
+
 loadReports();
 setInterval(() => loadReports({ preserveSelection: true }), REPORT_REFRESH_INTERVAL_MS);
 setInterval(refreshRelativeTimes, RELATIVE_TIME_TICK_MS);
@@ -211,6 +223,7 @@ async function loadActivity(clusterId) {
       throw new Error(payload.error || `Request failed with ${response.status}`);
     }
     state.activity = { events: payload.events || [], loading: false, error: null };
+    state.activityLoadedAt = Date.now();
   } catch (error) {
     state.activity = { events: [], loading: false, error: error.message };
   }
@@ -733,6 +746,7 @@ function renderActivity() {
   const halt = Boolean(state.data?.engine_status?.halt_active);
   els.activityPanel.classList.toggle("halted", halt);
   applyActivityCollapse();
+  renderActivityLive();
 
   if (state.activity.loading) {
     appendActivityEmpty("Loading recent activity…");
@@ -761,13 +775,202 @@ function renderActivity() {
   // timestamps fall within a 30-second window into a single run group so
   // that any small skew between the three writers stays in the same group.
   const groups = groupEventsByRun(events);
-  groups.forEach((group) => {
+  let lastDayKey = null;
+  groups.forEach((group, idx) => {
+    const dayKey = dayKeyFor(group.anchorTs);
+    if (dayKey !== lastDayKey) {
+      els.activityList.append(dateDivider(group.anchorTs));
+      lastDayKey = dayKey;
+    }
+
     const wrap = document.createElement("div");
     wrap.className = "activity-run";
+    wrap.dataset.runIndex = String(idx);
     wrap.append(runDivider(group));
-    group.events.forEach((event) => wrap.append(activityRow(event)));
+
+    const { active, skips } = partitionGroupEvents(group.events);
+    const dedupedActive = dedupeActive(active);
+    dedupedActive.forEach((bundle) => wrap.append(activityRow(bundle)));
+
+    if (skips.length > 0) {
+      if (state.activitySkipsInline || dedupedActive.length === 0) {
+        skips.forEach((event) => wrap.append(activityRow({ event, kindBundle: false })));
+      } else {
+        wrap.append(skipsDisclosure(group, skips));
+      }
+    }
     els.activityList.append(wrap);
   });
+}
+
+function renderActivityLive() {
+  const loadedAt = state.activityLoadedAt;
+  if (!loadedAt) {
+    els.activityLive.hidden = true;
+    return;
+  }
+  els.activityLive.hidden = false;
+  els.activityLiveText.textContent = formatRelative(new Date(loadedAt).toISOString());
+}
+
+function dayKeyFor(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function dateDivider(ts) {
+  const wrap = document.createElement("div");
+  wrap.className = "activity-date-divider";
+  const d = ts ? new Date(ts) : new Date();
+  const now = new Date();
+  const today = dayKeyFor(now.toISOString());
+  const yesterday = (() => {
+    const y = new Date(now);
+    y.setDate(y.getDate() - 1);
+    return dayKeyFor(y.toISOString());
+  })();
+  const key = dayKeyFor(ts || now.toISOString());
+  let label;
+  if (key === today) label = "Today";
+  else if (key === yesterday) label = "Yesterday";
+  else label = d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+  wrap.innerHTML = `<span>${escapeHtml(label)}</span><time datetime="${escapeHtml(ts || "")}">${escapeHtml(d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }))}</time>`;
+  return wrap;
+}
+
+function partitionGroupEvents(events) {
+  const active = [];
+  const skips = [];
+  events.forEach((event) => {
+    if (event.kind === "skip") {
+      skips.push(event);
+    } else {
+      active.push(event);
+    }
+  });
+  // Sort active so highest-signal items surface first within a group.
+  const weight = (event) => {
+    if (event.halt_active) return 0;
+    if (event.error || event.eviction_errors > 0) return 1;
+    if (event.applied) return 2;
+    if (event.kind === "cordon_evict") return 3;
+    if (event.mode === "dry-run") return 4;
+    return 5;
+  };
+  active.sort((a, b) => weight(a) - weight(b));
+  return { active, skips };
+}
+
+function dedupeActive(events) {
+  // Two events for the same workload (cpu + memory) collapse into a single
+  // row carrying both rule chips and a combined change summary.
+  const bundles = [];
+  const byKey = new Map();
+  events.forEach((event) => {
+    if (event.kind !== "patch_request" && event.kind !== "nudge") {
+      bundles.push({ event, extras: [] });
+      return;
+    }
+    const key = [
+      event.kind,
+      event.namespace || "",
+      event.workload || "",
+      event.container || "",
+      event.mode || "",
+      event.applied ? "1" : "0",
+      event.error ? "e" : "",
+      event.halt_active ? "h" : ""
+    ].join("|");
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.extras.push(event);
+    } else {
+      const bundle = { event, extras: [] };
+      byKey.set(key, bundle);
+      bundles.push(bundle);
+    }
+  });
+  return bundles;
+}
+
+function skipsDisclosure(group, skips) {
+  const wrap = document.createElement("div");
+  wrap.className = "activity-skip-disclosure";
+  const expanded = Boolean(state.activitySkipsExpanded[group.anchorTs]);
+  if (expanded) wrap.classList.add("expanded");
+
+  const clusters = clusterSkipReasons(skips);
+  const summaryBits = clusters.map((c) => `<b>${c.count}</b> ${escapeHtml(c.label.toLowerCase())}`).join(" · ");
+
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "activity-skip-head";
+  head.setAttribute("aria-expanded", expanded ? "true" : "false");
+  head.innerHTML = `
+    <span class="caret" aria-hidden="true">▸</span>
+    <span class="count"><b>${skips.length}</b> skipped</span>
+    <span class="reasons">${summaryBits}</span>
+  `;
+  head.addEventListener("click", () => {
+    state.activitySkipsExpanded[group.anchorTs] = !state.activitySkipsExpanded[group.anchorTs];
+    renderActivity();
+  });
+  wrap.append(head);
+
+  if (expanded) {
+    const body = document.createElement("div");
+    body.className = "activity-skip-body";
+    skips.forEach((event) => body.append(activityRow({ event, extras: [] })));
+    wrap.append(body);
+  }
+  return wrap;
+}
+
+function clusterSkipReasons(skips) {
+  const buckets = new Map();
+  skips.forEach((event) => {
+    const r = humanizeReason(event.reason || "Skipped");
+    const key = r.key;
+    if (!buckets.has(key)) {
+      buckets.set(key, { label: r.label, count: 0 });
+    }
+    buckets.get(key).count++;
+  });
+  return [...buckets.values()].sort((a, b) => b.count - a.count);
+}
+
+function humanizeReason(raw) {
+  const r = String(raw || "").toLowerCase();
+  if (r.includes("confidence") && r.includes("below minimum")) {
+    return { key: "low-confidence", label: "Low confidence", detail: "Finding hasn't reached the configured minimum confidence threshold.", help: helpLink("min-confidence") };
+  }
+  if (r.includes("no remediation target")) {
+    return { key: "no-target", label: "No remediation target", detail: "This rule isn't enabled for the workload in config/remediation-targets.json.", help: helpLink("remediation-targets") };
+  }
+  if (r.includes("provider-managed")) {
+    return { key: "provider-managed", label: "Provider-managed", detail: "Workload is managed by the cloud provider and intentionally excluded.", help: helpLink("provider-managed") };
+  }
+  if (r.includes("missing container")) {
+    return { key: "missing-container", label: "Missing container name", detail: "The remediation target entry needs an explicit container name.", help: helpLink("remediation-targets") };
+  }
+  if (r.includes("seen") && r.includes("need")) {
+    return { key: "min-occurrences", label: "Needs more runs", detail: raw, help: helpLink("min-occurrences") };
+  }
+  if (r.includes("persistence")) {
+    return { key: "persistence", label: "Persistence not configured", detail: raw, help: helpLink("persistence") };
+  }
+  if (r.includes("not found in snapshot")) {
+    return { key: "no-snapshot", label: "Not in snapshot", detail: raw, help: null };
+  }
+  if (r.includes("no safe trim")) {
+    return { key: "no-trim", label: "No safe trim available", detail: "Trim would breach the 50% max-trim cap or 10m / 32Mi floor.", help: helpLink("safe-trim") };
+  }
+  return { key: r || "skipped", label: raw || "Skipped", detail: "", help: null };
+}
+
+function helpLink(anchor) {
+  return `https://github.com/GipsyChef/cluster-optimizer/blob/main/README.md#${anchor}`;
 }
 
 function appendActivityEmpty(message) {
@@ -830,46 +1033,45 @@ function runDivider(group) {
   rel.className = "rel";
   rel.textContent = formatRelative(group.anchorTs);
 
-  const counts = document.createElement("span");
-  counts.className = "counts";
+  const chips = document.createElement("span");
+  chips.className = "chips";
   const c = summarizeRun(group.events);
-  counts.innerHTML = [
-    countSpan(c.patches, c.patches === 1 ? "patch" : "patches"),
-    countSpan(c.skips, c.skips === 1 ? "skip" : "skips"),
-    countSpan(c.cordons, c.cordons === 1 ? "eval" : "evals"),
-    c.errors > 0 ? countSpan(c.errors, c.errors === 1 ? "error" : "errors") : ""
-  ].filter(Boolean).join(" · ");
+  const segments = [];
+  if (c.applied > 0) segments.push(chipHTML("applied", c.applied, c.applied === 1 ? "applied" : "applied"));
+  if (c.dry > 0) segments.push(chipHTML("dry", c.dry, "dry-run"));
+  if (c.cordons > 0) segments.push(chipHTML("node", c.cordons, c.cordons === 1 ? "node action" : "node actions"));
+  if (c.errors > 0) segments.push(chipHTML("error", c.errors, c.errors === 1 ? "error" : "errors"));
+  if (segments.length === 0 && c.skips > 0) {
+    segments.push(chipHTML("idle", c.skips, "no changes"));
+  } else if (c.skips > 0) {
+    segments.push(chipHTML("skip", c.skips, c.skips === 1 ? "skipped" : "skipped"));
+  }
+  chips.innerHTML = segments.join("");
 
-  header.append(time, rel, counts);
+  header.append(time, rel, chips);
   return header;
 }
 
-function countSpan(value, label) {
-  const cls = value === 0 ? "zero" : "";
-  return `<b class="${cls}">${value}</b> ${escapeHtml(label)}`;
+function chipHTML(kind, value, label) {
+  return `<span class="chip chip-${kind}"><b>${value}</b>${escapeHtml(label)}</span>`;
 }
 
 function summarizeRun(events) {
-  let patches = 0, skips = 0, cordons = 0, errors = 0;
+  let applied = 0, dry = 0, cordons = 0, skips = 0, errors = 0;
   events.forEach((event) => {
-    if (event.error || event.eviction_errors > 0) errors++;
-    if (event.kind === "patch_request") patches++;
-    else if (event.kind === "skip") skips++;
-    else if (event.kind === "cordon_evict") cordons++;
+    if (event.error || event.eviction_errors > 0) { errors++; return; }
+    if (event.kind === "skip") { skips++; return; }
+    if (event.kind === "cordon_evict") { cordons++; return; }
+    if (event.applied) applied++;
+    else if (event.mode === "dry-run") dry++;
   });
-  return { patches, skips, cordons, errors };
+  return { applied, dry, cordons, skips, errors };
 }
 
 function filterActivity(events) {
   switch (state.activityFilter) {
-    case "active":
-      return events.filter((event) => event.kind !== "skip");
-    case "live":
-      return events.filter((event) => event.mode === "live");
     case "dry-run":
       return events.filter((event) => event.mode === "dry-run");
-    case "skips":
-      return events.filter((event) => event.kind === "skip");
     case "errors":
       return events.filter((event) => event.error || event.eviction_errors > 0);
     default:
@@ -877,13 +1079,18 @@ function filterActivity(events) {
   }
 }
 
-function activityRow(event) {
+function activityRow(input) {
+  const bundle = input && input.event ? input : { event: input, extras: [] };
+  const event = bundle.event;
+  const extras = bundle.extras || [];
   const article = document.createElement("article");
   let toneClass;
   if (event.error || event.eviction_errors > 0) {
     toneClass = "error";
   } else if (event.kind === "skip") {
     toneClass = "skip";
+  } else if (event.applied) {
+    toneClass = "applied";
   } else {
     toneClass = event.mode || "dry-run";
   }
@@ -898,23 +1105,30 @@ function activityRow(event) {
   scope.className = "scope";
   if (event.kind === "cordon_evict") {
     const target = event.target_node ? `node ${event.target_node}` : "consolidation pass";
-    scope.innerHTML = `<strong>${escapeHtml(target)}</strong><code>${escapeHtml(event.kind)}</code>`;
+    scope.innerHTML = `<strong>${escapeHtml(target)}</strong><code>node action</code>`;
   } else {
     const scopeText = [event.namespace, event.workload].filter(Boolean).join("/") || "cluster";
     const container = event.container ? ` · container ${escapeHtml(event.container)}` : "";
-    const rule = event.rule_id
-      ? `<code class="rule-link" data-rule="${escapeHtml(event.rule_id)}" data-namespace="${escapeHtml(event.namespace || "")}" data-workload="${escapeHtml(event.workload || "")}" title="Jump to this finding">${escapeHtml(event.rule_id)}</code>`
-      : "";
-    scope.innerHTML = `<strong>${escapeHtml(scopeText)}${container}</strong>${rule}`;
+    const ruleEvents = [event, ...extras].filter((e) => e.rule_id);
+    const ruleChips = ruleEvents
+      .map((e) => `<code class="rule-link" data-rule="${escapeHtml(e.rule_id)}" data-namespace="${escapeHtml(e.namespace || "")}" data-workload="${escapeHtml(e.workload || "")}" title="Jump to this finding">${escapeHtml(e.rule_id)}</code>`)
+      .join("");
+    scope.innerHTML = `<strong>${escapeHtml(scopeText)}${container}</strong>${ruleChips}`;
   }
-  const link = scope.querySelector(".rule-link");
-  if (link) {
+  scope.querySelectorAll(".rule-link").forEach((link) => {
     link.addEventListener("click", () => jumpToFinding(link.dataset.rule, link.dataset.namespace, link.dataset.workload));
-  }
+  });
 
   const change = document.createElement("div");
   change.className = "change";
-  change.innerHTML = changeSummary(event);
+  if (event.kind === "skip") {
+    change.innerHTML = skipChangeSummary(event);
+    const help = change.querySelector(".reason-help");
+    if (help) help.addEventListener("click", (e) => e.stopPropagation());
+  } else {
+    const summaries = [event, ...extras].map(changeSummary).filter(Boolean);
+    change.innerHTML = summaries.join(" · ");
+  }
 
   const badge = document.createElement("span");
   badge.className = "status-badge";
@@ -958,14 +1172,19 @@ function activityRow(event) {
   return article;
 }
 
+function skipChangeSummary(event) {
+  const r = humanizeReason(event.reason || "Skipped");
+  const help = r.help
+    ? ` <a class="reason-help" href="${escapeHtml(r.help)}" target="_blank" rel="noopener" title="${escapeHtml(r.detail || "")}">why?</a>`
+    : "";
+  return `<span class="reason-label" title="${escapeHtml(event.reason || "")}">${escapeHtml(r.label)}</span>${help}`;
+}
+
 function changeSummary(event) {
   if (event.kind === "cordon_evict") {
     const parts = [];
-    if (event.target_node) {
-      parts.push(`target <b>${escapeHtml(event.target_node)}</b>`);
-    }
     if (event.evicted > 0 || event.eviction_errors > 0) {
-      parts.push(`evicted <b>${event.evicted}</b>${event.eviction_errors > 0 ? ` · ${event.eviction_errors} failed` : ""}`);
+      parts.push(`evicted <b>${event.evicted}</b>${event.eviction_errors > 0 ? ` · <span class="delta-down">${event.eviction_errors} failed</span>` : ""}`);
     }
     if (parts.length === 0 && event.reason) {
       parts.push(escapeHtml(event.reason));
@@ -974,15 +1193,26 @@ function changeSummary(event) {
   }
   const segments = [];
   if (event.before_cpu_m || event.after_cpu_m) {
-    segments.push(`cpu <b>${event.before_cpu_m || 0}m → ${event.after_cpu_m || 0}m</b>`);
+    segments.push(`cpu <b>${event.before_cpu_m || 0}m → ${event.after_cpu_m || 0}m</b>${deltaPctSpan(event.before_cpu_m, event.after_cpu_m)}`);
   }
   if (event.before_memory_mib || event.after_memory_mib) {
-    segments.push(`mem <b>${event.before_memory_mib || 0}Mi → ${event.after_memory_mib || 0}Mi</b>`);
+    segments.push(`mem <b>${event.before_memory_mib || 0}Mi → ${event.after_memory_mib || 0}Mi</b>${deltaPctSpan(event.before_memory_mib, event.after_memory_mib)}`);
   }
   if (segments.length === 0) {
     return escapeHtml(event.reason || "no field changed");
   }
   return segments.join(" · ");
+}
+
+function deltaPctSpan(before, after) {
+  const b = Number(before) || 0;
+  const a = Number(after) || 0;
+  if (b <= 0) return "";
+  const pct = Math.round(((a - b) / b) * 100);
+  if (pct === 0) return "";
+  const cls = pct < 0 ? "delta-down" : "delta-up";
+  const sign = pct > 0 ? "+" : "";
+  return ` <span class="${cls}">${sign}${pct}%</span>`;
 }
 
 function findingStillActive(event) {

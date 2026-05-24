@@ -483,7 +483,7 @@ button.engine-pill {
 
 .activity-controls {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
   flex-wrap: wrap;
 }
@@ -500,10 +500,84 @@ button.engine-pill {
   text-transform: uppercase;
 }
 
+.activity-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(36, 107, 75, 0.08);
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.activity-live em {
+  font-style: normal;
+  color: var(--ink);
+}
+
+.activity-live .pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 0 rgba(36, 107, 75, 0.55);
+  animation: activity-pulse 1.8s infinite;
+}
+
+@keyframes activity-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(36, 107, 75, 0.55); }
+  70% { box-shadow: 0 0 0 8px rgba(36, 107, 75, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(36, 107, 75, 0); }
+}
+
+.activity-skips-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.activity-skips-toggle input {
+  margin: 0;
+  accent-color: var(--ink);
+}
+
 .activity-list {
   display: grid;
   gap: 14px;
   padding: 10px;
+}
+
+.activity-date-divider {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 2px 6px 6px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.activity-date-divider time {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.activity-list > .activity-date-divider:first-child {
+  margin-top: 0;
 }
 
 .activity-run {
@@ -512,11 +586,19 @@ button.engine-pill {
 }
 
 .activity-run-divider {
+  position: sticky;
+  top: 56px;
+  z-index: 2;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   align-items: baseline;
-  padding: 4px 6px 6px;
+  padding: 6px 8px;
+  margin: 0 -2px;
+  border-radius: 6px;
+  background: rgba(255, 253, 247, 0.94);
+  backdrop-filter: saturate(140%) blur(6px);
+  -webkit-backdrop-filter: saturate(140%) blur(6px);
   border-bottom: 1px dashed var(--line);
   color: var(--muted);
   font-size: 11px;
@@ -534,20 +616,76 @@ button.engine-pill {
   color: var(--muted);
 }
 
-.activity-run-divider .counts {
+.activity-run-divider .chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
   margin-left: auto;
-  color: var(--muted);
-  letter-spacing: 0;
 }
 
-.activity-run-divider .counts b {
-  color: var(--ink);
+.activity-run-divider .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  font-size: 10px;
   font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--panel);
 }
 
-.activity-run-divider .counts b.zero {
+.activity-run-divider .chip b {
+  font-weight: 900;
+  color: var(--ink);
+}
+
+.activity-run-divider .chip-applied {
+  border-color: rgba(36, 107, 75, 0.4);
+  color: var(--green);
+  background: rgba(36, 107, 75, 0.08);
+}
+
+.activity-run-divider .chip-applied b {
+  color: var(--green);
+}
+
+.activity-run-divider .chip-dry {
+  border-color: rgba(149, 101, 24, 0.4);
+  color: var(--amber);
+  background: rgba(149, 101, 24, 0.06);
+}
+
+.activity-run-divider .chip-dry b {
+  color: var(--amber);
+}
+
+.activity-run-divider .chip-node {
+  border-color: rgba(31, 93, 132, 0.36);
+  color: var(--blue);
+  background: rgba(31, 93, 132, 0.06);
+}
+
+.activity-run-divider .chip-node b {
+  color: var(--blue);
+}
+
+.activity-run-divider .chip-error {
+  border-color: rgba(168, 59, 52, 0.45);
+  color: var(--red);
+  background: rgba(168, 59, 52, 0.06);
+}
+
+.activity-run-divider .chip-error b {
+  color: var(--red);
+}
+
+.activity-run-divider .chip-idle,
+.activity-run-divider .chip-skip {
   color: var(--muted);
-  font-weight: 700;
 }
 
 .activity-event {
@@ -563,8 +701,14 @@ button.engine-pill {
   font-size: 13px;
 }
 
+.activity-event.applied,
 .activity-event.live {
   border-left-color: var(--green);
+}
+
+.activity-event.applied {
+  border-left-width: 4px;
+  background: linear-gradient(90deg, rgba(36, 107, 75, 0.05), var(--panel) 32%);
 }
 
 .activity-event.dry-run {
@@ -624,6 +768,36 @@ button.engine-pill {
 
 .activity-event .change b {
   color: var(--ink);
+}
+
+.activity-event .change .delta-down {
+  color: var(--green);
+  font-weight: 700;
+}
+
+.activity-event .change .delta-up {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.activity-event .change .reason-label {
+  color: var(--muted);
+  font-family: inherit;
+}
+
+.activity-event .change .reason-help {
+  margin-left: 6px;
+  color: var(--blue);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+  border-bottom: 1px dotted var(--blue);
+}
+
+.activity-event .change .reason-help:hover {
+  color: var(--ink);
+  border-color: var(--ink);
 }
 
 .activity-event .status-badge {
@@ -690,6 +864,70 @@ button.engine-pill {
   font-size: 11px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.activity-skip-disclosure {
+  display: grid;
+  gap: 6px;
+}
+
+.activity-skip-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 6px;
+  background: rgba(255, 253, 247, 0.55);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+}
+
+.activity-skip-head:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
+.activity-skip-head .caret {
+  display: inline-block;
+  width: 12px;
+  transition: transform 120ms ease;
+  color: var(--muted);
+}
+
+.activity-skip-disclosure.expanded .activity-skip-head .caret {
+  transform: rotate(90deg);
+}
+
+.activity-skip-head .count b {
+  color: var(--ink);
+  font-weight: 900;
+  margin-right: 4px;
+}
+
+.activity-skip-head .reasons {
+  color: var(--muted);
+  font-weight: 600;
+  margin-left: auto;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.activity-skip-head .reasons b {
+  color: var(--ink);
+  font-weight: 800;
+  margin-right: 2px;
+}
+
+.activity-skip-body {
+  display: grid;
+  gap: 6px;
+  padding-left: 14px;
 }
 
 .activity-empty {
