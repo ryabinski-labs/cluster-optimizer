@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,26 @@ func TestAPIResponseEngineStatusWireShape(t *testing.T) {
 	for _, key := range []string{"auto_apply_enabled", "auto_apply_live", "halt_active", "halt_reason", "last_run_at", "last_run_actions"} {
 		if _, ok := status[key]; !ok {
 			t.Errorf("missing engine_status key %q in %v", key, status)
+		}
+	}
+}
+
+func TestDashboardRefreshesReportsAndRelativeTimes(t *testing.T) {
+	script, err := os.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("read dashboard script: %v", err)
+	}
+	body := string(script)
+	for _, want := range []string{
+		"const REPORT_REFRESH_INTERVAL_MS = 60 * 1000;",
+		"const RELATIVE_TIME_TICK_MS = 30 * 1000;",
+		"setInterval(() => loadReports({ preserveSelection: true }), REPORT_REFRESH_INTERVAL_MS);",
+		"setInterval(refreshRelativeTimes, RELATIVE_TIME_TICK_MS);",
+		"function refreshRelativeTimes()",
+		"renderEngineStatus();",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard script is missing %q", want)
 		}
 	}
 }
