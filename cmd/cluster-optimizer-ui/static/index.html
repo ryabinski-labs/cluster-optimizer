@@ -153,14 +153,19 @@
               <h2>Recent Activity</h2>
             </div>
             <div class="activity-controls">
+              <span id="activityLive" class="activity-live" hidden>
+                <i class="pulse" aria-hidden="true"></i>
+                <span>Live · updated <em id="activityLiveText">just now</em></span>
+              </span>
               <div class="segmented activity-filter" role="group" aria-label="Activity filter">
                 <button class="segment active" type="button" data-activity-filter="all">All</button>
-                <button class="segment" type="button" data-activity-filter="active">Active only</button>
-                <button class="segment" type="button" data-activity-filter="live">Live only</button>
-                <button class="segment" type="button" data-activity-filter="skips">Skips only</button>
                 <button class="segment" type="button" data-activity-filter="errors">Errors</button>
                 <button class="segment" type="button" data-activity-filter="dry-run">Dry-run</button>
               </div>
+              <label class="activity-skips-toggle" title="When off (default), low-signal skipped events are collapsed into a single expandable line per run.">
+                <input id="activitySkipsInline" type="checkbox" />
+                <span>Show skipped inline</span>
+              </label>
               <button id="activityToggle" type="button" class="activity-toggle" aria-expanded="true" aria-controls="activityList">Collapse</button>
             </div>
           </header>

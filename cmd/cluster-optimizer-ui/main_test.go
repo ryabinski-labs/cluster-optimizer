@@ -151,10 +151,12 @@ func TestDashboardEmptyStateCoversEngineStates(t *testing.T) {
 	}
 }
 
-// Lock the frontend filter-segment values to the set the backend
-// activity-row renderer expects. Adding a filter without updating the
-// renderer is a silent regression that produces "Active only" or
-// "Skips only" segments that return zero events.
+// Lock the frontend filter-segment values to the set the activity-row
+// renderer's filterActivity() switch expects. Adding a filter without
+// updating the renderer is a silent regression that produces a pill that
+// returns zero events. The skipped-event collapse moved out of the
+// segmented filter and into the "Show skipped inline" toggle, so the
+// segmented set is intentionally narrower.
 func TestDashboardActivityFilterSegments(t *testing.T) {
 	page, err := os.ReadFile("static/index.html")
 	if err != nil {
@@ -163,14 +165,22 @@ func TestDashboardActivityFilterSegments(t *testing.T) {
 	body := string(page)
 	for _, want := range []string{
 		`data-activity-filter="all"`,
+		`data-activity-filter="errors"`,
+		`data-activity-filter="dry-run"`,
+		`id="activitySkipsInline"`,
+		`id="activityLive"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard html is missing required activity control %q", want)
+		}
+	}
+	for _, removed := range []string{
 		`data-activity-filter="active"`,
 		`data-activity-filter="live"`,
 		`data-activity-filter="skips"`,
-		`data-activity-filter="errors"`,
-		`data-activity-filter="dry-run"`,
 	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("dashboard html is missing filter segment %q", want)
+		if strings.Contains(body, removed) {
+			t.Fatalf("dashboard html still contains retired filter segment %q", removed)
 		}
 	}
 }
