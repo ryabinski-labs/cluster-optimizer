@@ -5,8 +5,12 @@ const state = {
   filter: "",
   activity: { events: [], loading: false, error: null },
   activityFilter: "all",
-  activityCollapsed: false
+  activityCollapsed: false,
+  reportsLoading: false
 };
+
+const REPORT_REFRESH_INTERVAL_MS = 60 * 1000;
+const RELATIVE_TIME_TICK_MS = 30 * 1000;
 
 const els = {
   clusterId: document.querySelector("#clusterId"),
@@ -125,13 +129,20 @@ els.activityToggle.addEventListener("click", () => {
 });
 
 loadReports();
+setInterval(() => loadReports({ preserveSelection: true }), REPORT_REFRESH_INTERVAL_MS);
+setInterval(refreshRelativeTimes, RELATIVE_TIME_TICK_MS);
 
-async function loadReports() {
+async function loadReports(options = {}) {
+  if (state.reportsLoading) return;
+  state.reportsLoading = true;
   clearError();
   els.refresh.disabled = true;
   const clusterIdRaw = els.clusterId.value.trim() || "default";
   const clusterId = encodeURIComponent(clusterIdRaw);
   const limit = encodeURIComponent(els.limit.value || "25");
+  const selectedGeneratedAt = options.preserveSelection
+    ? state.data?.reports?.[state.selectedIndex]?.generated_at
+    : null;
   try {
     const response = await fetch(`/api/reports?cluster_id=${clusterId}&limit=${limit}`);
     const payload = await response.json();
@@ -139,14 +150,25 @@ async function loadReports() {
       throw new Error(payload.error || `Request failed with ${response.status}`);
     }
     state.data = payload;
-    state.selectedIndex = 0;
+    if (selectedGeneratedAt) {
+      const nextIndex = (payload.reports || []).findIndex((report) => report.generated_at === selectedGeneratedAt);
+      state.selectedIndex = nextIndex >= 0 ? nextIndex : 0;
+    } else {
+      state.selectedIndex = 0;
+    }
     render();
     loadActivity(clusterIdRaw);
   } catch (error) {
     showError(error.message);
   } finally {
+    state.reportsLoading = false;
     els.refresh.disabled = false;
   }
+}
+
+function refreshRelativeTimes() {
+  renderEngineStatus();
+  renderActivity();
 }
 
 async function loadActivity(clusterId) {
