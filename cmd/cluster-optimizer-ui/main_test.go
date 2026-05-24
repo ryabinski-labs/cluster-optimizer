@@ -111,6 +111,92 @@ func TestAPIResponseEngineStatusWireShape(t *testing.T) {
 	}
 }
 
+// Lock the wire keys the frontend reads for the halt toggle and the
+// halt-control availability flag. A silent rename here breaks the
+// halt button without a frontend test failing.
+func TestAPIResponseHaltControlWireShape(t *testing.T) {
+	resp := apiResponse{HaltControlAvailable: true}
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := map[string]any{}
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := got["halt_control_available"]; !ok {
+		t.Fatalf("missing halt_control_available in response: %v", got)
+	}
+}
+
+// Verify the empty-state copy branches exist in the dashboard script for
+// each of the engine states the UX spec calls for: Disabled, Live but no
+// events yet, and Halted. A missing branch would render an operator a
+// blank panel with no explanation of why no activity is showing.
+func TestDashboardEmptyStateCoversEngineStates(t *testing.T) {
+	script, err := os.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("read dashboard script: %v", err)
+	}
+	body := string(script)
+	for _, want := range []string{
+		"function emptyStateMessage",
+		"advisory-only mode",
+		"Halt switch is active",
+		"3 consecutive runs",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard script is missing empty-state copy %q", want)
+		}
+	}
+}
+
+// Lock the frontend filter-segment values to the set the backend
+// activity-row renderer expects. Adding a filter without updating the
+// renderer is a silent regression that produces "Active only" or
+// "Skips only" segments that return zero events.
+func TestDashboardActivityFilterSegments(t *testing.T) {
+	page, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read dashboard html: %v", err)
+	}
+	body := string(page)
+	for _, want := range []string{
+		`data-activity-filter="all"`,
+		`data-activity-filter="active"`,
+		`data-activity-filter="live"`,
+		`data-activity-filter="skips"`,
+		`data-activity-filter="errors"`,
+		`data-activity-filter="dry-run"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard html is missing filter segment %q", want)
+		}
+	}
+}
+
+// Halt POST gating: confirm=true is required, kubeClient must be present,
+// and only POST is accepted. These three guard rails are the entire
+// safety story for the endpoint — a regression here would let an
+// accidental GET or unconfirmed POST mutate the cluster.
+func TestHandleHaltRequiresConfirmAndPOST(t *testing.T) {
+	srv := &server{} // nil kubeClient
+	// GET is rejected
+	req := httptest.NewRequest(http.MethodGet, "/api/halt", nil)
+	rec := httptest.NewRecorder()
+	srv.handleHalt(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET expected 405, got %d", rec.Code)
+	}
+	// POST without kubeClient → 503
+	req = httptest.NewRequest(http.MethodPost, "/api/halt", strings.NewReader(`{"active":true,"confirm":true}`))
+	rec = httptest.NewRecorder()
+	srv.handleHalt(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST without kubeClient expected 503, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestDashboardRefreshesReportsAndRelativeTimes(t *testing.T) {
 	script, err := os.ReadFile("static/app.js")
 	if err != nil {

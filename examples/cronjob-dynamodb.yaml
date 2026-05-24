@@ -26,7 +26,7 @@ spec:
             - name: optimizer
               image: ghcr.io/gipsychef/cluster-optimizer:latest
               imagePullPolicy: IfNotPresent
-              args: ["--output", "json"]
+              args: ["--output", "json", "--auto-apply", "--nudge"]
               env:
                 - name: CLUSTER_OPTIMIZER_CLUSTER_ID
                   value: "default"
@@ -47,6 +47,14 @@ spec:
                     secretKeyRef:
                       name: cluster-optimizer-aws
                       key: AWS_SECRET_ACCESS_KEY
+                - name: CLUSTER_OPTIMIZER_AUTOAPPLY
+                  value: "true"
+                - name: CLUSTER_OPTIMIZER_NUDGE_LIVE
+                  value: "true"
+              volumeMounts:
+                - name: targets
+                  mountPath: /etc/cluster-optimizer
+                  readOnly: true
               resources:
                 requests:
                   cpu: 1m
@@ -59,3 +67,7 @@ spec:
                 readOnlyRootFilesystem: true
                 capabilities:
                   drop: ["ALL"]
+          volumes:
+            - name: targets
+              configMap:
+                name: cluster-optimizer-targets

@@ -6,7 +6,10 @@ const state = {
   activity: { events: [], loading: false, error: null },
   activityFilter: "all",
   activityCollapsed: false,
-  reportsLoading: false
+  activityCollapsedByUser: false,
+  reportsLoading: false,
+  haltPosting: false,
+  haltError: ""
 };
 
 const REPORT_REFRESH_INTERVAL_MS = 60 * 1000;
@@ -57,6 +60,8 @@ const els = {
   enginePillModeText: document.querySelector("#enginePillModeText"),
   enginePillHalt: document.querySelector("#enginePillHalt"),
   enginePillHaltText: document.querySelector("#enginePillHaltText"),
+  enginePillHaltAction: document.querySelector("#enginePillHaltAction"),
+  enginePillHaltHelp: document.querySelector("#enginePillHaltHelp"),
   enginePillLastRun: document.querySelector("#enginePillLastRun"),
   enginePillLastRunText: document.querySelector("#enginePillLastRunText"),
   enginePillLastRunDetail: document.querySelector("#enginePillLastRunDetail"),
@@ -110,6 +115,31 @@ document.addEventListener("click", (event) => {
   if (els.engineModePopover.classList.contains("hidden")) return;
   if (els.engineModePopover.contains(event.target) || els.enginePillMode.contains(event.target)) return;
   toggleEngineModePopover(false);
+});
+
+els.enginePillLastRun.addEventListener("click", () => {
+  if (!els.enginePillLastRun.classList.contains("actionable")) return;
+  scrollToActivityPanel();
+});
+els.enginePillLastRun.addEventListener("keydown", (event) => {
+  if (!els.enginePillLastRun.classList.contains("actionable")) return;
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    scrollToActivityPanel();
+  }
+});
+
+els.enginePillHaltAction.addEventListener("click", () => {
+  if (els.enginePillHaltAction.disabled) return;
+  const halted = Boolean(state.data?.engine_status?.halt_active);
+  if (halted) {
+    // Recovery path: single click, no modal. Friction here delays
+    // returning to normal operation during an incident.
+    postHalt(false);
+  } else {
+    // Activation: confirm modal protects against accidental clicks.
+    showHaltConfirm();
+  }
 });
 
 document.querySelectorAll("[data-activity-filter]").forEach((button) => {
@@ -381,6 +411,22 @@ function renderEngineStatus() {
     ? `Cluster ConfigMap cluster-optimizer/cluster-optimizer-halt is set: ${status?.halt_reason || "halt=true"}`
     : "No halt ConfigMap value detected on the last run.";
 
+  renderHaltAction(halt);
+
+  // Whether the Last Run tile becomes a clickable jump-to-activity affordance.
+  // Engine has run at least once → it's actionable; otherwise plain text.
+  const hasHistory = Boolean(status?.last_run_at);
+  els.enginePillLastRun.classList.toggle("actionable", hasHistory);
+  if (hasHistory) {
+    els.enginePillLastRun.setAttribute("role", "button");
+    els.enginePillLastRun.setAttribute("tabindex", "0");
+    els.enginePillLastRun.setAttribute("aria-label", "View recent optimization activity");
+  } else {
+    els.enginePillLastRun.removeAttribute("role");
+    els.enginePillLastRun.removeAttribute("tabindex");
+    els.enginePillLastRun.removeAttribute("aria-label");
+  }
+
   if (!status || !status.last_run_at) {
     els.enginePillLastRun.classList.remove("errors");
     els.enginePillLastRunText.textContent = "Never";
@@ -393,6 +439,7 @@ function renderEngineStatus() {
     const parts = [`${actions} action${actions === 1 ? "" : "s"}`];
     if (mode.live && applied > 0) parts.push(`${applied} applied`);
     if (errors > 0) parts.push(`${errors} error${errors === 1 ? "" : "s"}`);
+    parts.push("view activity");
     els.enginePillLastRunDetail.textContent = parts.join(" · ");
     els.enginePillLastRun.classList.toggle("errors", errors > 0);
   }
@@ -402,6 +449,203 @@ function renderEngineStatus() {
     els.engineBanner.textContent = `Active remediation is halted: ${status?.halt_reason || "cluster-optimizer/cluster-optimizer-halt ConfigMap is set to halt=true."}`;
   }
   renderEnginePopover(status);
+}
+
+function renderHaltAction(halted) {
+  const btn = els.enginePillHaltAction;
+  const help = els.enginePillHaltHelp;
+  const kubeAvailable = state.data?.halt_control_available !== false;
+
+  btn.hidden = false;
+  btn.classList.remove("danger", "recover", "busy", "disabled");
+
+  if (state.haltPosting) {
+    btn.classList.add("busy");
+    btn.disabled = true;
+    btn.textContent = halted ? "Deactivating…" : "Activating…";
+    btn.setAttribute("aria-busy", "true");
+    help.textContent = "";
+    help.classList.remove("error");
+    return;
+  }
+
+  btn.setAttribute("aria-busy", "false");
+
+  if (!kubeAvailable) {
+    btn.classList.add("danger", "disabled");
+    btn.disabled = true;
+    btn.textContent = halted ? "Deactivate" : "Activate halt";
+    help.textContent = "Set KUBECONFIG or run the UI on a host with ~/.kube/config to enable halt control.";
+    help.classList.remove("error");
+    return;
+  }
+
+  btn.disabled = false;
+  if (halted) {
+    btn.classList.add("recover");
+    btn.textContent = "Deactivate";
+  } else {
+    btn.classList.add("danger");
+    btn.textContent = "Activate halt";
+  }
+
+  if (state.haltError) {
+    help.textContent = state.haltError;
+    help.classList.add("error");
+  } else {
+    help.textContent = "";
+    help.classList.remove("error");
+  }
+}
+
+function scrollToActivityPanel() {
+  // Force-expand the panel so the click lands on something visible, then scroll.
+  state.activityCollapsed = false;
+  state.activityCollapsedByUser = false;
+  applyActivityCollapse();
+  els.activityPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  // Brief attention pulse on the panel header so the eye lands.
+  const head = els.activityPanel.querySelector(".panel-head");
+  if (head) {
+    head.classList.add("flash");
+    setTimeout(() => head.classList.remove("flash"), 1500);
+  }
+}
+
+async function postHalt(active) {
+  if (state.haltPosting) return;
+  state.haltPosting = true;
+  state.haltError = "";
+  renderEngineStatus();
+  try {
+    const response = await fetch("/api/halt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active, confirm: true })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Request failed with ${response.status}`);
+    }
+    // Optimistic update so the UI reflects the new state immediately;
+    // the next /api/reports poll will refresh with authoritative data.
+    if (state.data?.engine_status) {
+      state.data.engine_status.halt_active = Boolean(active);
+    }
+  } catch (error) {
+    state.haltError = error.message || String(error);
+  } finally {
+    state.haltPosting = false;
+    renderEngineStatus();
+    // Refresh authoritative data so engine_status reflects the cluster
+    // truth (the cron loop won't update for ~30m otherwise).
+    if (!state.haltError) {
+      loadReports({ preserveSelection: true });
+    }
+    // Auto-clear errors after a few seconds so the pill doesn't shout forever.
+    if (state.haltError) {
+      setTimeout(() => {
+        if (state.haltError) {
+          state.haltError = "";
+          renderEngineStatus();
+        }
+      }, 10000);
+    }
+  }
+}
+
+function showHaltConfirm() {
+  // Re-uses the existing .modal-overlay / .modal-card primitives from
+  // showInstructionsModal; the .danger variant styles the confirm button red.
+  const previouslyFocused = document.activeElement;
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-labelledby", "haltConfirmTitle");
+  overlay.setAttribute("aria-describedby", "haltConfirmBody");
+
+  const card = document.createElement("div");
+  card.className = "modal-card";
+
+  const h2 = document.createElement("h2");
+  h2.id = "haltConfirmTitle";
+  h2.textContent = "Activate halt switch?";
+
+  const p = document.createElement("p");
+  p.id = "haltConfirmBody";
+  p.textContent = "This pauses auto-apply and live nudge across the cluster immediately. Work already in flight continues; the next scheduled run will refuse to act.";
+
+  const ul = document.createElement("ul");
+  ul.className = "modal-bullets";
+  ul.innerHTML = `
+    <li>Creates ConfigMap <code>cluster-optimizer/cluster-optimizer-halt</code> with <code>halt=true</code>.</li>
+    <li>Reversible from this dashboard or via <code>kubectl delete configmap</code>.</li>
+  `;
+
+  const actions = document.createElement("div");
+  actions.className = "modal-actions";
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "modal-button cancel";
+  cancel.textContent = "Cancel";
+
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "modal-button danger";
+  confirm.textContent = "Halt now";
+
+  actions.append(cancel, confirm);
+  card.append(h2, p, ul, actions);
+  overlay.append(card);
+  document.body.append(overlay);
+
+  // Focus management: initial focus on Cancel (safe default; defends
+  // against accidental Enter). Esc and backdrop click cancel. Focus trap
+  // cycles Tab/Shift+Tab between the two buttons. On close (any path)
+  // focus returns to the halt action button.
+  const closeAll = () => {
+    overlay.removeEventListener("keydown", trapKey);
+    overlay.remove();
+    if (previouslyFocused && typeof previouslyFocused.focus === "function") {
+      previouslyFocused.focus();
+    } else {
+      els.enginePillHaltAction.focus();
+    }
+  };
+  const trapKey = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeAll();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [cancel, confirm];
+    const active = document.activeElement;
+    const idx = focusable.indexOf(active);
+    if (event.shiftKey) {
+      event.preventDefault();
+      const next = idx <= 0 ? focusable[focusable.length - 1] : focusable[idx - 1];
+      next.focus();
+    } else {
+      event.preventDefault();
+      const next = idx === focusable.length - 1 ? focusable[0] : focusable[idx + 1];
+      next.focus();
+    }
+  };
+  overlay.addEventListener("keydown", trapKey);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeAll();
+  });
+  cancel.addEventListener("click", closeAll);
+  confirm.addEventListener("click", () => {
+    closeAll();
+    postHalt(true);
+  });
+
+  // Defer focus to the next frame so screen readers announce the dialog.
+  requestAnimationFrame(() => cancel.focus());
 }
 
 function engineMode(status) {
@@ -463,11 +707,13 @@ function toggleEngineModePopover(open) {
 }
 
 function applyActivityAutoCollapse() {
-  // Default collapsed when there are zero events; expanded otherwise. Once
-  // the user clicks the toggle their preference sticks for the session.
-  if (state.activityCollapsedByUser) return;
-  state.activityCollapsed = (state.activity.events || []).length === 0;
-  applyActivityCollapse();
+  // Kept as a no-op for backwards compatibility with existing callers.
+  // The panel now stays expanded by default so the operator can see the
+  // empty-state messaging (which explains *why* the feed is empty);
+  // user-initiated collapse via the toggle button still works.
+  if (state.activityCollapsedByUser) {
+    applyActivityCollapse();
+  }
 }
 
 function applyActivityCollapse() {
@@ -489,44 +735,141 @@ function renderActivity() {
   applyActivityCollapse();
 
   if (state.activity.loading) {
-    const div = document.createElement("div");
-    div.className = "activity-empty";
-    div.textContent = "Loading recent activity…";
-    els.activityList.append(div);
+    appendActivityEmpty("Loading recent activity…");
     return;
   }
   if (state.activity.error) {
-    const div = document.createElement("div");
-    div.className = "activity-empty";
-    div.textContent = `Could not load remediation history: ${state.activity.error}`;
-    els.activityList.append(div);
+    appendActivityEmpty(`Could not load remediation history: ${state.activity.error}`);
     return;
   }
 
-  const events = filterActivity(state.activity.events);
+  const allEvents = state.activity.events || [];
+  const events = filterActivity(allEvents);
+
   if (events.length === 0) {
-    const div = document.createElement("div");
-    div.className = "activity-empty";
-    if ((state.activity.events || []).length === 0) {
-      div.innerHTML = `No remediation activity in the last 7 days. The applier runs after each scheduled CronJob.`;
+    if (allEvents.length === 0) {
+      appendActivityEmpty(emptyStateMessage(state.data?.engine_status));
     } else {
-      div.textContent = "No remediation activity matches this filter.";
+      appendActivityEmpty("No remediation activity matches this filter.");
     }
-    els.activityList.append(div);
     return;
   }
 
-  events.forEach((event) => {
-    els.activityList.append(activityRow(event));
+  // Group events by run. Events written in the same CronJob tick share a
+  // timestamp at second-level precision (RFC3339); the applier, nudger,
+  // and skipper all use status.LastRunAt. We cluster events whose
+  // timestamps fall within a 30-second window into a single run group so
+  // that any small skew between the three writers stays in the same group.
+  const groups = groupEventsByRun(events);
+  groups.forEach((group) => {
+    const wrap = document.createElement("div");
+    wrap.className = "activity-run";
+    wrap.append(runDivider(group));
+    group.events.forEach((event) => wrap.append(activityRow(event)));
+    els.activityList.append(wrap);
   });
+}
+
+function appendActivityEmpty(message) {
+  const div = document.createElement("div");
+  div.className = "activity-empty";
+  if (message instanceof Node) {
+    div.append(message);
+  } else {
+    div.textContent = message;
+  }
+  els.activityList.append(div);
+}
+
+function emptyStateMessage(status) {
+  if (!status) {
+    return "No remediation activity yet. Run the CronJob at least once to populate this feed.";
+  }
+  if (status.halt_active) {
+    return "Halt switch is active. No new actions will be recorded until it's deactivated.";
+  }
+  if (!status.auto_apply_enabled && !status.nudge_enabled) {
+    return "No remediation activity. The engine is in advisory-only mode — set --auto-apply or --nudge on the CronJob to start recording actions here.";
+  }
+  const live = status.auto_apply_live || status.nudge_live;
+  if (live) {
+    const since = status.last_run_at ? formatRelative(status.last_run_at) : "recently";
+    return `No actions in the last 7 days. Engine has been live (last run ${since}); the applier waits for the same finding to appear in 3 consecutive runs before patching.`;
+  }
+  return "No remediation activity. The engine is enabled but the matching env-var gate is missing, so it's stuck in dry-run.";
+}
+
+function groupEventsByRun(events) {
+  // Events are sorted newest-first by the API. Cluster adjacent events
+  // whose timestamps are within RUN_CLUSTER_MS of the group's anchor
+  // timestamp into the same run.
+  const RUN_CLUSTER_MS = 30 * 1000;
+  const groups = [];
+  let current = null;
+  events.forEach((event) => {
+    const ts = event.timestamp ? new Date(event.timestamp).getTime() : 0;
+    if (!current || Math.abs((current.anchorMs - ts)) > RUN_CLUSTER_MS) {
+      current = { anchorMs: ts, anchorTs: event.timestamp, events: [] };
+      groups.push(current);
+    }
+    current.events.push(event);
+  });
+  return groups;
+}
+
+function runDivider(group) {
+  const header = document.createElement("header");
+  header.className = "activity-run-divider";
+
+  const time = document.createElement("time");
+  time.dateTime = group.anchorTs || "";
+  time.textContent = group.anchorTs ? new Date(group.anchorTs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "—";
+  time.title = group.anchorTs ? new Date(group.anchorTs).toLocaleString() : "";
+
+  const rel = document.createElement("span");
+  rel.className = "rel";
+  rel.textContent = formatRelative(group.anchorTs);
+
+  const counts = document.createElement("span");
+  counts.className = "counts";
+  const c = summarizeRun(group.events);
+  counts.innerHTML = [
+    countSpan(c.patches, c.patches === 1 ? "patch" : "patches"),
+    countSpan(c.skips, c.skips === 1 ? "skip" : "skips"),
+    countSpan(c.cordons, c.cordons === 1 ? "eval" : "evals"),
+    c.errors > 0 ? countSpan(c.errors, c.errors === 1 ? "error" : "errors") : ""
+  ].filter(Boolean).join(" · ");
+
+  header.append(time, rel, counts);
+  return header;
+}
+
+function countSpan(value, label) {
+  const cls = value === 0 ? "zero" : "";
+  return `<b class="${cls}">${value}</b> ${escapeHtml(label)}`;
+}
+
+function summarizeRun(events) {
+  let patches = 0, skips = 0, cordons = 0, errors = 0;
+  events.forEach((event) => {
+    if (event.error || event.eviction_errors > 0) errors++;
+    if (event.kind === "patch_request") patches++;
+    else if (event.kind === "skip") skips++;
+    else if (event.kind === "cordon_evict") cordons++;
+  });
+  return { patches, skips, cordons, errors };
 }
 
 function filterActivity(events) {
   switch (state.activityFilter) {
+    case "active":
+      return events.filter((event) => event.kind !== "skip");
     case "live":
       return events.filter((event) => event.mode === "live");
     case "dry-run":
       return events.filter((event) => event.mode === "dry-run");
+    case "skips":
+      return events.filter((event) => event.kind === "skip");
     case "errors":
       return events.filter((event) => event.error || event.eviction_errors > 0);
     default:
@@ -536,7 +879,14 @@ function filterActivity(events) {
 
 function activityRow(event) {
   const article = document.createElement("article");
-  const toneClass = (event.error || event.eviction_errors > 0) ? "error" : event.mode || "dry-run";
+  let toneClass;
+  if (event.error || event.eviction_errors > 0) {
+    toneClass = "error";
+  } else if (event.kind === "skip") {
+    toneClass = "skip";
+  } else {
+    toneClass = event.mode || "dry-run";
+  }
   article.className = `activity-event ${toneClass}`;
 
   const time = document.createElement("time");
@@ -580,6 +930,9 @@ function activityRow(event) {
   } else if (event.mode === "dry-run") {
     badge.classList.add("dry");
     badge.textContent = "Dry-run";
+  } else if (event.kind === "skip") {
+    badge.classList.add("skipped");
+    badge.textContent = "Skipped";
   } else {
     badge.textContent = event.reason ? "Skipped" : "Reported";
   }

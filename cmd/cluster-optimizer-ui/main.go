@@ -20,11 +20,25 @@ import (
 	"time"
 
 	"github.com/GipsyChef/cluster-optimizer/internal/analyzer"
+	"github.com/GipsyChef/cluster-optimizer/internal/collector"
 	"github.com/GipsyChef/cluster-optimizer/internal/store"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+)
+
+// Halt ConfigMap coordinates with internal/applier and internal/nudger; if
+// you change these constants, change the matching defaults in those packages
+// too.
+const (
+	haltControlNamespace = "cluster-optimizer"
+	haltControlConfigMap = "cluster-optimizer-halt"
+	haltControlKey       = "halt"
 )
 
 //go:embed static
@@ -44,6 +58,10 @@ type apiResponse struct {
 	Reports      []reportRecord `json:"reports"`
 	Trend        trendResponse  `json:"trend"`
 	EngineStatus *engineStatus  `json:"engine_status,omitempty"`
+	// HaltControlAvailable reports whether the UI server can mutate the
+	// halt ConfigMap. False when the server has no kubeconfig (the UI
+	// loads fine without it, but the halt toggle is read-only).
+	HaltControlAvailable bool `json:"halt_control_available"`
 }
 
 // engineStatus mirrors store.EngineStatus for the UI. We keep a thin local
@@ -182,6 +200,7 @@ type server struct {
 	table              string
 	region             string
 	client             *dynamodb.Client
+	kubeClient         kubernetes.Interface
 	static             http.Handler
 	remediationTargets map[string]remediationTarget
 	minRemediationDays int
@@ -202,12 +221,29 @@ type server struct {
 
 	cacheMu sync.Mutex
 	cache   map[string]*reportsCacheEntry
+
+	// engineStatusCacheTTL bounds how long a computed engine_status is
+	// reused across polls. Short by design (default 5s): long enough to
+	// absorb burst concurrency (N tabs polling at the same boundary
+	// would otherwise fan out to N DDB GetItems + N ConfigMap GETs and
+	// saturate connection pools), short enough that other dashboard
+	// tabs see a halt POST within one cache window. handleHalt
+	// proactively invalidates so the originating tab sees the new state
+	// without waiting.
+	engineStatusCacheTTL time.Duration
+	engineStatusMu       sync.Mutex
+	engineStatusCache    map[string]*engineStatusCacheEntry
 }
 
 type reportsCacheEntry struct {
 	expiresAt time.Time
 	reports   []reportRecord
 	rollups   map[string]recommendationRollup
+}
+
+type engineStatusCacheEntry struct {
+	expiresAt time.Time
+	status    *engineStatus
 }
 
 func main() {
@@ -228,6 +264,7 @@ func run(ctx context.Context, args []string) error {
 	var minRemediationDays int
 	var trendReportCap int
 	var cacheTTLSeconds int
+	var engineStatusCacheTTLSeconds int
 	flags := flag.NewFlagSet("cluster-optimizer-ui", flag.ContinueOnError)
 	flags.StringVar(&addr, "addr", envOr("CLUSTER_OPTIMIZER_UI_ADDR", "127.0.0.1:8088"), "listen address")
 	flags.StringVar(&table, "table", envOr("DYNAMODB_TABLE", "cluster-optimizer-reports"), "DynamoDB table")
@@ -240,6 +277,7 @@ func run(ctx context.Context, args []string) error {
 	flags.StringVar(&githubRef, "github-ref", envOr("REMEDIATION_WORKFLOW_REF", "main"), "Git ref for workflow_dispatch")
 	flags.IntVar(&trendReportCap, "trend-report-cap", envIntOr("TREND_REPORT_CAP", 50), "max recent reports fetched from DynamoDB to build trend/rollups")
 	flags.IntVar(&cacheTTLSeconds, "cache-ttl-seconds", envIntOr("REPORTS_CACHE_TTL_SECONDS", 30), "in-memory TTL for reports+rollups responses (0 disables the cache)")
+	flags.IntVar(&engineStatusCacheTTLSeconds, "engine-status-cache-ttl-seconds", envIntOr("ENGINE_STATUS_CACHE_TTL_SECONDS", 5), "in-memory TTL for engine_status responses (0 disables the cache; absorbs burst polling)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -262,10 +300,20 @@ func run(ctx context.Context, args []string) error {
 	if trendReportCap > 200 {
 		trendReportCap = 200
 	}
+	// Best-effort Kubernetes clientset: the UI works fine without it
+	// (everything except the halt toggle is DynamoDB-backed). We log and
+	// continue so a missing kubeconfig doesn't take down the dashboard.
+	kubeClient, kubeErr := collector.GetClientset()
+	if kubeErr != nil {
+		log.Printf("halt control disabled: kubernetes clientset unavailable: %v", kubeErr)
+		kubeClient = nil
+	}
+
 	srv := &server{
 		table:              table,
 		region:             region,
 		client:             client,
+		kubeClient:         kubeClient,
 		static:             http.FileServer(http.FS(staticRoot)),
 		remediationTargets: targets,
 		minRemediationDays: minRemediationDays,
@@ -273,9 +321,11 @@ func run(ctx context.Context, args []string) error {
 		githubWorkflow:     githubWorkflow,
 		rewriteWorkflow:    rewriteWorkflow,
 		githubRef:          githubRef,
-		trendReportCap:     int32(trendReportCap),
-		cacheTTL:           time.Duration(cacheTTLSeconds) * time.Second,
-		cache:              map[string]*reportsCacheEntry{},
+		trendReportCap:       int32(trendReportCap),
+		cacheTTL:             time.Duration(cacheTTLSeconds) * time.Second,
+		cache:                map[string]*reportsCacheEntry{},
+		engineStatusCacheTTL: time.Duration(engineStatusCacheTTLSeconds) * time.Second,
+		engineStatusCache:    map[string]*engineStatusCacheEntry{},
 	}
 
 	mux := http.NewServeMux()
@@ -283,6 +333,7 @@ func run(ctx context.Context, args []string) error {
 	mux.HandleFunc("/api/remediations", srv.handleRemediation)
 	mux.HandleFunc("/api/remediations/download", srv.handleDownload)
 	mux.HandleFunc("/api/remediations/history", srv.handleRemediationHistory)
+	mux.HandleFunc("/api/halt", srv.handleHalt)
 	mux.HandleFunc("/api/health", srv.handleHealth)
 	mux.Handle("/", srv.static)
 
@@ -296,9 +347,6 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleReports(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-
 	clusterID := r.URL.Query().Get("cluster_id")
 	if clusterID == "" {
 		clusterID = "default"
@@ -313,46 +361,65 @@ func (s *server) handleReports(w http.ResponseWriter, r *http.Request) {
 		limit = int32(value)
 	}
 
-	allReports, rollups, err := s.reportsAndRollups(ctx, clusterID)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+	// reportsAndRollups and LoadEngineStatus are independent DynamoDB
+	// calls with very different cost profiles (the first can fetch tens of
+	// KB-MB of report_json; the second is a single GetItem). Running them
+	// sequentially under a shared timeout means a slow Query can starve
+	// the GetItem, which surfaces as "context deadline exceeded" in the
+	// logs. We give each its own budget and run them concurrently.
+	type reportsResult struct {
+		reports []reportRecord
+		rollups map[string]recommendationRollup
+		err     error
+	}
+	type statusResult struct {
+		status *engineStatus
+		err    error
+	}
+	reportsCh := make(chan reportsResult, 1)
+	statusCh := make(chan statusResult, 1)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		reports, rollups, err := s.reportsAndRollups(ctx, clusterID)
+		reportsCh <- reportsResult{reports: reports, rollups: rollups, err: err}
+	}()
+	go func() {
+		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+		defer cancel()
+		st, err := s.engineStatusFor(ctx, clusterID)
+		statusCh <- statusResult{status: st, err: err}
+	}()
+
+	rr := <-reportsCh
+	sr := <-statusCh
+
+	if rr.err != nil {
+		writeError(w, http.StatusBadGateway, rr.err.Error())
 		return
 	}
-
-	reports := allReports
-	if int(limit) < len(allReports) {
-		reports = allReports[:limit]
-	}
-
 	// Engine status is best-effort — a missing sentinel just means this
 	// cluster has never run the remediation engine, and the UI should
 	// render the strip in its "no data yet" state. Don't fail the whole
 	// response for it.
-	var status *engineStatus
-	if loaded, loadErr := store.LoadEngineStatus(ctx, s.client, s.table, clusterID); loadErr != nil {
-		log.Printf("engine status load failed for %s: %v", clusterID, loadErr)
-	} else if loaded != nil {
-		status = &engineStatus{
-			AutoApplyEnabled: loaded.AutoApplyEnabled,
-			AutoApplyLive:    loaded.AutoApplyLive,
-			NudgeEnabled:     loaded.NudgeEnabled,
-			NudgeLive:        loaded.NudgeLive,
-			HaltActive:       loaded.HaltActive,
-			HaltReason:       loaded.HaltReason,
-			LastRunAt:        loaded.LastRunAt,
-			LastRunActions:   loaded.LastRunActions,
-			LastRunApplied:   loaded.LastRunApplied,
-			LastRunErrors:    loaded.LastRunErrors,
-		}
+	if sr.err != nil {
+		log.Printf("engine status load failed for %s: %v", clusterID, sr.err)
+	}
+
+	reports := rr.reports
+	if int(limit) < len(rr.reports) {
+		reports = rr.reports[:limit]
 	}
 
 	writeJSON(w, http.StatusOK, apiResponse{
-		ClusterID:    clusterID,
-		Table:        s.table,
-		Region:       s.region,
-		Reports:      reports,
-		Trend:        s.buildTrend(allReports, rollups),
-		EngineStatus: status,
+		ClusterID:            clusterID,
+		Table:                s.table,
+		Region:               s.region,
+		Reports:              reports,
+		Trend:                s.buildTrend(rr.reports, rr.rollups),
+		EngineStatus:         sr.status,
+		HaltControlAvailable: s.kubeClient != nil,
 	})
 }
 
@@ -472,6 +539,170 @@ func (s *server) handleRemediation(w http.ResponseWriter, r *http.Request) {
 	}
 	workflowURL := fmt.Sprintf("https://github.com/%s/actions/workflows/%s", s.githubRepository, workflow)
 	writeJSON(w, http.StatusAccepted, remediationResponse{Status: "dispatched", WorkflowURL: workflowURL, Remediation: rollup.Remediation})
+}
+
+// engineStatusFor computes the dashboard engine_status payload: DynamoDB
+// ENGINE_STATUS sentinel merged with a live read of the halt ConfigMap when
+// the UI has a kubeconfig. Caches the result for engineStatusCacheTTL so
+// burst polling (multiple tabs, manual refresh) doesn't fan out into N
+// DDB GetItems + N kube GETs. handleHalt invalidates the entry so the
+// originating tab observes the new state on its next poll.
+func (s *server) engineStatusFor(ctx context.Context, clusterID string) (*engineStatus, error) {
+	if s.engineStatusCacheTTL > 0 {
+		s.engineStatusMu.Lock()
+		entry, ok := s.engineStatusCache[clusterID]
+		s.engineStatusMu.Unlock()
+		if ok && time.Now().Before(entry.expiresAt) {
+			return entry.status, nil
+		}
+	}
+
+	loaded, err := store.LoadEngineStatus(ctx, s.client, s.table, clusterID)
+	var st *engineStatus
+	if err == nil && loaded != nil {
+		st = &engineStatus{
+			AutoApplyEnabled: loaded.AutoApplyEnabled,
+			AutoApplyLive:    loaded.AutoApplyLive,
+			NudgeEnabled:     loaded.NudgeEnabled,
+			NudgeLive:        loaded.NudgeLive,
+			HaltActive:       loaded.HaltActive,
+			HaltReason:       loaded.HaltReason,
+			LastRunAt:        loaded.LastRunAt,
+			LastRunActions:   loaded.LastRunActions,
+			LastRunApplied:   loaded.LastRunApplied,
+			LastRunErrors:    loaded.LastRunErrors,
+		}
+	}
+	// Override halt_active with the live ConfigMap when the UI can read
+	// the cluster. The DynamoDB ENGINE_STATUS sentinel is only updated
+	// by the CronJob (every ~30m), so without this override an /api/halt
+	// POST would visually revert within seconds when the next /api/reports
+	// poll lands on a stale value. See QA finding HIGH-1.
+	if s.kubeClient != nil && st != nil {
+		cm, cmErr := s.kubeClient.CoreV1().ConfigMaps(haltControlNamespace).Get(ctx, haltControlConfigMap, metav1.GetOptions{})
+		switch {
+		case cmErr == nil:
+			st.HaltActive = cm.Data[haltControlKey] == "true"
+			if st.HaltActive {
+				st.HaltReason = "halt=true (live ConfigMap)"
+			} else {
+				st.HaltReason = ""
+			}
+		case apierrors.IsNotFound(cmErr):
+			st.HaltActive = false
+			st.HaltReason = ""
+		default:
+			// Read failure: keep the DynamoDB-reported value rather than
+			// flipping halt off on a transient kube API blip.
+			log.Printf("halt live check failed for %s: %v", clusterID, cmErr)
+		}
+	}
+
+	if s.engineStatusCacheTTL > 0 && err == nil {
+		s.engineStatusMu.Lock()
+		s.engineStatusCache[clusterID] = &engineStatusCacheEntry{
+			expiresAt: time.Now().Add(s.engineStatusCacheTTL),
+			status:    st,
+		}
+		s.engineStatusMu.Unlock()
+	}
+	return st, err
+}
+
+// invalidateEngineStatus drops any cached engine_status for clusterID so the
+// next read recomputes against authoritative sources. Called by handleHalt
+// immediately after a successful ConfigMap mutation so the dashboard tab
+// that issued the toggle observes the new state on its next poll without
+// waiting for the cache to expire.
+func (s *server) invalidateEngineStatus(clusterID string) {
+	s.engineStatusMu.Lock()
+	delete(s.engineStatusCache, clusterID)
+	s.engineStatusMu.Unlock()
+}
+
+// handleHalt activates or deactivates the cluster-optimizer halt switch by
+// writing or deleting the cluster-optimizer/cluster-optimizer-halt ConfigMap.
+//
+// Security model: the UI listens on 127.0.0.1 by default, so the trust
+// boundary is "whoever can open a TCP connection to localhost on the
+// operator's machine" — which is the operator. If the UI is ever bound to a
+// non-loopback address, this endpoint MUST be re-evaluated. There is no
+// per-user authentication here.
+//
+// Behavior: POST { "active": true|false, "confirm": true }. Refuses without
+// confirm=true. Refuses with 503 when the UI has no kubeconfig (graceful
+// degradation; the UI still loads, just can't toggle halt). Activate creates
+// or updates the ConfigMap; deactivate deletes it (cleaner than setting
+// halt=false, and matches the recovery path documented in docs/runbook.md).
+func (s *server) handleHalt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.kubeClient == nil {
+		writeError(w, http.StatusServiceUnavailable, "halt control requires a kubernetes clientset; set KUBECONFIG or run the UI on a host with ~/.kube/config")
+		return
+	}
+	var req struct {
+		Active  bool `json:"active"`
+		Confirm bool `json:"confirm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if !req.Confirm {
+		writeError(w, http.StatusBadRequest, "confirm must be true")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	configMaps := s.kubeClient.CoreV1().ConfigMaps(haltControlNamespace)
+	if req.Active {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      haltControlConfigMap,
+				Namespace: haltControlNamespace,
+			},
+			Data: map[string]string{haltControlKey: "true"},
+		}
+		_, err := configMaps.Create(ctx, cm, metav1.CreateOptions{})
+		if apierrors.IsAlreadyExists(err) {
+			existing, getErr := configMaps.Get(ctx, haltControlConfigMap, metav1.GetOptions{})
+			if getErr != nil {
+				writeError(w, http.StatusBadGateway, "failed to read existing halt ConfigMap: "+getErr.Error())
+				return
+			}
+			if existing.Data == nil {
+				existing.Data = map[string]string{}
+			}
+			existing.Data[haltControlKey] = "true"
+			if _, updateErr := configMaps.Update(ctx, existing, metav1.UpdateOptions{}); updateErr != nil {
+				writeError(w, http.StatusBadGateway, "failed to update halt ConfigMap: "+updateErr.Error())
+				return
+			}
+		} else if err != nil {
+			writeError(w, http.StatusBadGateway, "failed to create halt ConfigMap: "+err.Error())
+			return
+		}
+		log.Printf("halt: activated by UI client %s", r.RemoteAddr)
+	} else {
+		err := configMaps.Delete(ctx, haltControlConfigMap, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			writeError(w, http.StatusBadGateway, "failed to delete halt ConfigMap: "+err.Error())
+			return
+		}
+		log.Printf("halt: deactivated by UI client %s", r.RemoteAddr)
+	}
+
+	// Drop the engine_status cache so the next /api/reports poll
+	// recomputes against the new ConfigMap state without waiting for
+	// the TTL to expire.
+	s.invalidateEngineStatus("default")
+
+	writeJSON(w, http.StatusOK, map[string]any{"halt_active": req.Active})
 }
 
 func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
