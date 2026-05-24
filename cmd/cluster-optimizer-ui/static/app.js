@@ -963,39 +963,42 @@ function clusterSkipReasons(skips) {
 }
 
 function humanizeReason(raw) {
+  // help is set only for skip reasons the user can actually act on — and the
+  // link text names the action ("Configure target", "Enable persistence")
+  // rather than the generic "why?". Reasons that are intentional engine
+  // guardrails (low confidence, provider-managed, no safe trim) or just need
+  // time (needs more runs, not in snapshot) get no link; the label + tooltip
+  // already say everything the user can do about them.
   const r = String(raw || "").toLowerCase();
   if (r.includes("confidence") && r.includes("below minimum")) {
-    return { key: "low-confidence", label: "Low confidence", detail: "Finding hasn't reached the configured minimum confidence threshold.", help: helpLink("min-confidence") };
+    return { key: "low-confidence", label: "Low confidence", detail: "Finding hasn't reached the configured minimum confidence threshold.", help: null, helpText: null };
   }
   if (r.includes("no remediation target")) {
-    return { key: "no-target", label: "No remediation target", detail: "This rule isn't enabled for the workload in config/remediation-targets.json.", help: helpLink("remediation-targets") };
+    return { key: "no-target", label: "No remediation target", detail: "This rule isn't enabled for the workload in config/remediation-targets.json.", help: helpLink("remediation-workflow"), helpText: "Configure target →" };
   }
   if (r.includes("provider-managed")) {
-    return { key: "provider-managed", label: "Provider-managed", detail: "Workload is managed by the cloud provider and intentionally excluded.", help: helpLink("provider-managed") };
+    return { key: "provider-managed", label: "Provider-managed", detail: "Workload is managed by the cloud provider and intentionally excluded.", help: null, helpText: null };
   }
   if (r.includes("missing container")) {
-    return { key: "missing-container", label: "Missing container name", detail: "The remediation target entry needs an explicit container name.", help: helpLink("remediation-targets") };
+    return { key: "missing-container", label: "Missing container name", detail: "The remediation target entry needs an explicit container name.", help: helpLink("remediation-workflow"), helpText: "Configure target →" };
   }
   if (r.includes("seen") && r.includes("need")) {
-    return { key: "min-occurrences", label: "Needs more runs", detail: raw, help: helpLink("min-occurrences") };
+    return { key: "min-occurrences", label: "Needs more runs", detail: raw, help: null, helpText: null };
   }
   if (r.includes("persistence")) {
-    return { key: "persistence", label: "Persistence not configured", detail: raw, help: helpLink("persistence") };
+    return { key: "persistence", label: "Persistence not configured", detail: raw, help: helpLink("dynamodb-persistence"), helpText: "Enable persistence →" };
   }
   if (r.includes("not found in snapshot")) {
-    return { key: "no-snapshot", label: "Not in snapshot", detail: raw, help: null };
+    return { key: "no-snapshot", label: "Not in snapshot", detail: raw, help: null, helpText: null };
   }
   if (r.includes("no safe trim")) {
-    return { key: "no-trim", label: "No safe trim available", detail: "Trim would breach the 50% max-trim cap or 10m / 32Mi floor.", help: helpLink("safe-trim") };
+    return { key: "no-trim", label: "No safe trim available", detail: "Trim would breach the 50% max-trim cap or 10m / 32Mi floor.", help: null, helpText: null };
   }
-  return { key: r || "skipped", label: raw || "Skipped", detail: "", help: null };
+  return { key: r || "skipped", label: raw || "Skipped", detail: "", help: null, helpText: null };
 }
 
-function helpLink(_anchor) {
-  // All current skip reasons are explained in the "Live Auto-Apply (opt-in)"
-  // README section. Anchor argument is retained so future reasons can fan
-  // out to their own anchors without changing the call sites.
-  return "https://github.com/GipsyChef/cluster-optimizer/blob/main/README.md#live-auto-apply-opt-in";
+function helpLink(anchor) {
+  return `https://github.com/GipsyChef/cluster-optimizer/blob/main/README.md#${anchor}`;
 }
 
 function appendActivityEmpty(message) {
@@ -1200,9 +1203,9 @@ function activityRow(input) {
 function skipChangeSummary(event) {
   const r = humanizeReason(event.reason || "Skipped");
   const help = r.help
-    ? ` <a class="reason-help" href="${escapeHtml(r.help)}" target="_blank" rel="noopener" title="${escapeHtml(r.detail || "")}">why?</a>`
+    ? ` <a class="reason-help" href="${escapeHtml(r.help)}" target="_blank" rel="noopener" title="${escapeHtml(r.detail || "")}">${escapeHtml(r.helpText || "Details →")}</a>`
     : "";
-  return `<span class="reason-label" title="${escapeHtml(event.reason || "")}">${escapeHtml(r.label)}</span>${help}`;
+  return `<span class="reason-label" title="${escapeHtml(r.detail || event.reason || "")}">${escapeHtml(r.label)}</span>${help}`;
 }
 
 function changeSummary(event) {
