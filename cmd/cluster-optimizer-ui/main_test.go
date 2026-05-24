@@ -231,9 +231,16 @@ func TestDashboardRefreshesReportsAndRelativeTimes(t *testing.T) {
 // don't silently regress:
 //   - Sticky run divider must use a JS-measured CSS variable, not the
 //     56px desktop guess that hid the divider under the mobile topbar.
-//   - The "why?" help link target must be a heading anchor that
-//     actually exists in README.md (#live-auto-apply-opt-in is the
-//     section that documents every skip criterion).
+//   - Skip-reason help links must point to anchors that actually exist
+//     in README.md AND are specific to a fix path. The previous
+//     iteration sent every skip reason to a single generic anchor
+//     (`#live-auto-apply-opt-in`), which set the expectation of a
+//     specific answer and delivered a generic bullet list — so users
+//     learned the help affordance didn't help. Only the actionable
+//     subset (no-target / missing-container → `#remediation-workflow`,
+//     persistence → `#dynamodb-persistence`) carries a link; the
+//     intentional guardrail rows (low confidence, provider-managed,
+//     no safe trim, needs more runs) must not.
 //   - The live pill must render "just now" rather than "0s ago"
 //     immediately after a refresh; "0s ago" reads as broken.
 func TestActivityFeedQARegressionLocks(t *testing.T) {
@@ -245,16 +252,31 @@ func TestActivityFeedQARegressionLocks(t *testing.T) {
 	for _, want := range []string{
 		"function syncActivityStickyTop",
 		"--activity-sticky-top",
-		`README.md#live-auto-apply-opt-in`,
+		`helpLink("remediation-workflow")`,
+		`helpLink("dynamodb-persistence")`,
+		`"Configure target →"`,
+		`"Enable persistence →"`,
 		`"just now"`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("dashboard script is missing QA-lock token %q", want)
 		}
 	}
-	if strings.Contains(js, `README.md#min-confidence`) ||
-		strings.Contains(js, `README.md#remediation-targets`) {
-		t.Fatalf("dashboard script still points to README anchors that do not exist")
+	for _, banned := range []string{
+		`README.md#min-confidence`,
+		`README.md#remediation-targets`,
+		`README.md#live-auto-apply-opt-in`,
+		`README.md#provider-managed`,
+		`README.md#safe-trim`,
+		`README.md#min-occurrences`,
+		`helpLink("min-confidence")`,
+		`helpLink("provider-managed")`,
+		`helpLink("safe-trim")`,
+		`helpLink("min-occurrences")`,
+	} {
+		if strings.Contains(js, banned) {
+			t.Fatalf("dashboard script must not use %q — either the README anchor doesn't exist, or the reason is an intentional guardrail with no fix path and shouldn't carry a help link", banned)
+		}
 	}
 
 	styles, err := os.ReadFile("static/styles.css")
@@ -268,7 +290,12 @@ func TestActivityFeedQARegressionLocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read README: %v", err)
 	}
-	if !strings.Contains(string(readme), "## Live Auto-Apply") {
-		t.Fatalf("README missing the heading that backs the help-link anchor")
+	for _, heading := range []string{
+		"## Remediation Workflow",
+		"## DynamoDB Persistence",
+	} {
+		if !strings.Contains(string(readme), heading) {
+			t.Fatalf("README missing %q — the activity-feed help links deep-link to its anchor", heading)
+		}
 	}
 }
