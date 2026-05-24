@@ -226,3 +226,49 @@ func TestDashboardRefreshesReportsAndRelativeTimes(t *testing.T) {
 		}
 	}
 }
+
+// Lock the QA-driven fixes from the activity-feed redesign so they
+// don't silently regress:
+//   - Sticky run divider must use a JS-measured CSS variable, not the
+//     56px desktop guess that hid the divider under the mobile topbar.
+//   - The "why?" help link target must be a heading anchor that
+//     actually exists in README.md (#live-auto-apply-opt-in is the
+//     section that documents every skip criterion).
+//   - The live pill must render "just now" rather than "0s ago"
+//     immediately after a refresh; "0s ago" reads as broken.
+func TestActivityFeedQARegressionLocks(t *testing.T) {
+	script, err := os.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("read dashboard script: %v", err)
+	}
+	js := string(script)
+	for _, want := range []string{
+		"function syncActivityStickyTop",
+		"--activity-sticky-top",
+		`README.md#live-auto-apply-opt-in`,
+		`"just now"`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("dashboard script is missing QA-lock token %q", want)
+		}
+	}
+	if strings.Contains(js, `README.md#min-confidence`) ||
+		strings.Contains(js, `README.md#remediation-targets`) {
+		t.Fatalf("dashboard script still points to README anchors that do not exist")
+	}
+
+	styles, err := os.ReadFile("static/styles.css")
+	if err != nil {
+		t.Fatalf("read dashboard styles: %v", err)
+	}
+	if !strings.Contains(string(styles), "var(--activity-sticky-top") {
+		t.Fatalf("activity-run-divider must read --activity-sticky-top so the sticky offset matches the live topbar height")
+	}
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	if !strings.Contains(string(readme), "## Live Auto-Apply") {
+		t.Fatalf("README missing the heading that backs the help-link anchor")
+	}
+}

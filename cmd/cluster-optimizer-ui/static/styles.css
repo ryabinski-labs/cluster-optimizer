@@ -587,7 +587,7 @@ button.engine-pill {
 
 .activity-run-divider {
   position: sticky;
-  top: 56px;
+  top: var(--activity-sticky-top, 56px);
   z-index: 2;
   display: flex;
   flex-wrap: wrap;

@@ -747,6 +747,7 @@ function renderActivity() {
   els.activityPanel.classList.toggle("halted", halt);
   applyActivityCollapse();
   renderActivityLive();
+  syncActivityStickyTop();
 
   if (state.activity.loading) {
     appendActivityEmpty("Loading recent activity…");
@@ -810,8 +811,23 @@ function renderActivityLive() {
     return;
   }
   els.activityLive.hidden = false;
-  els.activityLiveText.textContent = formatRelative(new Date(loadedAt).toISOString());
+  const deltaSec = Math.round((Date.now() - loadedAt) / 1000);
+  els.activityLiveText.textContent = deltaSec < 5
+    ? "just now"
+    : formatRelative(new Date(loadedAt).toISOString());
 }
+
+function syncActivityStickyTop() {
+  // Sticky run dividers need to clear the page-level topbar (which is
+  // itself position:sticky and varies in height with viewport width).
+  // Hardcoding `top` was wrong on mobile where the topbar wraps and is
+  // ~3x taller. Measure it once per render and once per resize.
+  const topbar = document.querySelector(".topbar");
+  if (!topbar || !els.activityPanel) return;
+  const rect = topbar.getBoundingClientRect();
+  els.activityPanel.style.setProperty("--activity-sticky-top", `${Math.ceil(rect.height)}px`);
+}
+window.addEventListener("resize", syncActivityStickyTop);
 
 function dayKeyFor(ts) {
   if (!ts) return "";
@@ -832,10 +848,16 @@ function dateDivider(ts) {
   })();
   const key = dayKeyFor(ts || now.toISOString());
   let label;
-  if (key === today) label = "Today";
-  else if (key === yesterday) label = "Yesterday";
-  else label = d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
-  wrap.innerHTML = `<span>${escapeHtml(label)}</span><time datetime="${escapeHtml(ts || "")}">${escapeHtml(d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }))}</time>`;
+  let showDate = false;
+  if (key === today) { label = "Today"; showDate = true; }
+  else if (key === yesterday) { label = "Yesterday"; showDate = true; }
+  else label = d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+  const dateAttr = ts || now.toISOString();
+  wrap.innerHTML = `<span>${escapeHtml(label)}</span>${
+    showDate
+      ? `<time datetime="${escapeHtml(dateAttr)}">${escapeHtml(d.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }))}</time>`
+      : ""
+  }`;
   return wrap;
 }
 
@@ -969,8 +991,11 @@ function humanizeReason(raw) {
   return { key: r || "skipped", label: raw || "Skipped", detail: "", help: null };
 }
 
-function helpLink(anchor) {
-  return `https://github.com/GipsyChef/cluster-optimizer/blob/main/README.md#${anchor}`;
+function helpLink(_anchor) {
+  // All current skip reasons are explained in the "Live Auto-Apply (opt-in)"
+  // README section. Anchor argument is retained so future reasons can fan
+  // out to their own anchors without changing the call sites.
+  return "https://github.com/GipsyChef/cluster-optimizer/blob/main/README.md#live-auto-apply-opt-in";
 }
 
 function appendActivityEmpty(message) {
