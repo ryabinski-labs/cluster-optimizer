@@ -328,6 +328,37 @@ Supported first-pass remediations are intentionally narrow:
 - Runtime modernization planning for persistent rewrite candidates. This
   creates a coding-agent instructions file, not implementation code.
 
+### Rule values for `supported_rules`
+
+Each target lists the rules it opts in to under `supported_rules`. Only the
+rules below have a remediation pipeline; listing any other rule has no effect.
+Each rule also requires specific target fields to be set — listing a rule
+without those fields leaves the UI in "remediation not available" state.
+
+| Rule ID                              | Remediation kind                 | Required target fields                                |
+| ------------------------------------ | -------------------------------- | ----------------------------------------------------- |
+| `memory-request-over-provisioned`    | live trim + api.yml PR patch     | `container` (live), `manifest_path` (PR)              |
+| `cpu-request-over-provisioned`       | live trim + api.yml PR patch     | `container` (live), `manifest_path` (PR)              |
+| `memory-request-below-usage`         | api.yml PR patch                 | `container`, `manifest_path`                          |
+| `single-replica-pdb-blocks-drain`    | api.yml PR patch                 | `manifest_path`                                       |
+| `cpu-hpa-low-request-sensitive`      | api.yml PR patch                 | `manifest_path`                                       |
+| `runtime-modernization-candidate`    | rewrite-instructions PR          | `repository`, `instructions_path`                     |
+
+All other analyzer rules (`cpu-hpa-without-cpu-request`,
+`daemonset-overhead-limits-small-node-efficiency`,
+`fixed-replica-capacity-without-autoscaler`, `hpa-min-equals-max`,
+`missing-pdb-for-multi-replica-workload`, `pdb-allows-full-disruption`,
+`pdb-max-unavailable-zero`) are advisory-only today. They surface in reports
+but have no remediation workflow, so listing them in `supported_rules` does
+nothing.
+
+Provider-managed workloads (DOKS-reconciled DaemonSets/Deployments such as
+`coredns`, `metrics-server`, `kube-proxy`, `cilium`, `csi-do-node`, and the
+entire `kube-system`, `kube-public`, `kube-node-lease`, and
+`cluster-optimizer` namespaces) are filtered out by the classifier before any
+remediation check runs. Adding entries for them in `remediation-targets.json`
+has no effect — they cannot be live-mutated or PR-remediated by this tool.
+
 Workloads must be mapped before the button can become available. The file `config/remediation-targets.json` is ignored by Git to protect your private configuration and repository names. 
 
 To set up your mappings, copy the public-safe example configuration file to `config/remediation-targets.json`:
