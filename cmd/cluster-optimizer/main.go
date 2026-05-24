@@ -162,6 +162,11 @@ func run(ctx context.Context, args []string) error {
 		}
 	}
 
+	// Planner skips become first-class audit events when the workload is
+	// in the remediation allowlist. This is what answers "why didn't you
+	// patch X?" on the dashboard without log diving.
+	events = append(events, skipperEvents(p.Skipped, status.LastRunAt, cls)...)
+
 	if writer != nil {
 		if err := writer.PutRemediations(ctx, clusterID, events); err != nil {
 			fmt.Fprintf(os.Stderr, "cluster-optimizer: failed to persist remediation events: %v\n", err)
@@ -172,6 +177,31 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	return nil
+}
+
+// skipperEvents converts planner SkippedReasons into RemediationEvents the UI
+// can render. We only emit skips for workloads in the remediation allowlist
+// to avoid flooding the feed: every CronJob tick would otherwise emit a skip
+// for every system/provider-managed finding in the cluster.
+func skipperEvents(skipped []plan.SkippedReason, ts time.Time, cls *classifier.Classifier) []store.RemediationEvent {
+	events := make([]store.RemediationEvent, 0, len(skipped))
+	for _, skip := range skipped {
+		if cls == nil {
+			continue
+		}
+		if _, hasTarget := cls.TargetFor(skip.Namespace, skip.Workload); !hasTarget {
+			continue
+		}
+		events = append(events, store.RemediationEvent{
+			Timestamp: ts,
+			Kind:      "skip",
+			Namespace: skip.Namespace,
+			Workload:  skip.Workload,
+			RuleID:    skip.RuleID,
+			Reason:    skip.Reason,
+		})
+	}
+	return events
 }
 
 // applierEvents converts the applier outcome list into RemediationEvents the

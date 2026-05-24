@@ -54,7 +54,9 @@
         </button>
         <div id="enginePillHalt" class="engine-pill halt">
           <em>Halt switch</em>
-          <b id="enginePillHaltText">Inactive</b>
+          <b id="enginePillHaltText" aria-live="polite">Inactive</b>
+          <button id="enginePillHaltAction" class="pill-action danger" type="button" hidden aria-describedby="enginePillHaltHelp">Activate halt</button>
+          <small id="enginePillHaltHelp" class="pill-help" role="status"></small>
         </div>
         <div id="enginePillLastRun" class="engine-pill">
           <em>Last run</em>
@@ -153,7 +155,9 @@
             <div class="activity-controls">
               <div class="segmented activity-filter" role="group" aria-label="Activity filter">
                 <button class="segment active" type="button" data-activity-filter="all">All</button>
+                <button class="segment" type="button" data-activity-filter="active">Active only</button>
                 <button class="segment" type="button" data-activity-filter="live">Live only</button>
+                <button class="segment" type="button" data-activity-filter="skips">Skips only</button>
                 <button class="segment" type="button" data-activity-filter="errors">Errors</button>
                 <button class="segment" type="button" data-activity-filter="dry-run">Dry-run</button>
               </div>
