@@ -15,6 +15,7 @@ relevant when the optional live-apply or live-nudger features are enabled.
 | Operator wants to revoke live-apply capability           | [Revoke applier RBAC](#revoke-applier-rbac)   |
 | Investigating what the optimizer did                     | [Read the recent run logs](#read-the-recent-run-logs) |
 | Want to validate behaviour without risk                  | [Return to dry-run mode](#return-to-dry-run-mode) |
+| Edited `remediation-targets.json` and need it in cluster | [Update the targets ConfigMap](#update-the-targets-configmap) |
 
 ---
 
@@ -157,6 +158,84 @@ kubectl -n cluster-optimizer edit cronjob cluster-optimizer
 ```
 
 The next run will be dry-run only.
+
+## Update the targets ConfigMap
+
+The CronJob loads `config/remediation-targets.json` from a ConfigMap
+(`cluster-optimizer-targets` in the `cluster-optimizer` namespace) that
+is mounted at `/etc/cluster-optimizer/remediation-targets.json`. The
+source file is gitignored, so the `Deploy Kubernetes` workflow does not
+ship it; updates are pushed from a maintainer workstation with kubectl
+pointed at the cluster.
+
+**Preview without applying:**
+
+```bash
+scripts/deploy-remediation-targets.sh --dry-run
+```
+
+Prints the generated ConfigMap YAML to stdout and exits without touching
+the cluster. Safe to run with any kubeconfig.
+
+**Apply:**
+
+```bash
+scripts/deploy-remediation-targets.sh
+# → configmap/cluster-optimizer-targets configured
+```
+
+The script is idempotent: it builds the ConfigMap client-side and pipes
+through `kubectl apply -f -`, so removed entries are removed and changed
+entries are replaced. The next CronJob firing picks up the new file.
+
+**Apply and force a run immediately:**
+
+```bash
+scripts/deploy-remediation-targets.sh --trigger-job
+```
+
+Creates a one-off Job named `cluster-optimizer-manual-<unix-ts>` from
+the CronJob template so you do not have to wait for the next scheduled
+tick. Requires the `cluster-optimizer` CronJob to exist.
+
+**Verify the cluster matches your local file:**
+
+```bash
+kubectl -n cluster-optimizer get configmap cluster-optimizer-targets \
+  -o jsonpath='{.data.remediation-targets\.json}' \
+  | diff - config/remediation-targets.json && echo "in sync"
+```
+
+A clean `diff` with `in sync` printed means the cluster is current.
+
+**Roll back to the previous version:**
+
+The script applies whatever your local file contains, so the rollback
+path is: restore the previous file content locally (from git history of
+a private vault, a backup, or by reverting your edits), then run the
+script again.
+
+If you do not have the previous content handy and a backup of the
+ConfigMap exists, restore from that:
+
+```bash
+# When you captured a backup before the change:
+#   kubectl -n cluster-optimizer get configmap cluster-optimizer-targets -o yaml > targets-backup.yaml
+kubectl apply -f targets-backup.yaml
+```
+
+If neither is available, the safest fallback is to write a minimal
+known-good `config/remediation-targets.json` (only `targets: []` is
+valid — the optimizer treats zero targets as "advisory mode only" with
+no remediable findings) and rerun the script.
+
+**When changes take effect:**
+
+- The in-cluster CronJob picks up the new ConfigMap on its next firing
+  (the CronJob mounts the file fresh for each Job; no rolling restart
+  needed). Default schedule is `*/30 * * * *`.
+- The local UI loads the file at process start, so restart the UI
+  process to pick up local edits.
 
 ## "Did the optimizer cause this incident?" checklist
 
