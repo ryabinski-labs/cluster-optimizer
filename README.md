@@ -371,6 +371,36 @@ Then edit `config/remediation-targets.json` to point a Kubernetes workload at it
 for manifest changes or `.github/workflows/generate-rewrite-instructions.yml`
 for runtime modernization planning.
 
+The local UI loads this file once at process start, so restart the UI
+process to pick up edits.
+
+### Deploying targets to the in-cluster CronJob
+
+The in-cluster CronJob mounts the targets file from a ConfigMap named
+`cluster-optimizer-targets` in the `cluster-optimizer` namespace (see
+`examples/cronjob-dynamodb.yaml`). Because `config/remediation-targets.json`
+is gitignored, the `Deploy Kubernetes` workflow cannot ship it for you —
+upload it from a workstation with kubectl pointed at the cluster:
+
+```bash
+# Preview the generated ConfigMap without touching the cluster
+scripts/deploy-remediation-targets.sh --dry-run
+
+# Apply the ConfigMap
+scripts/deploy-remediation-targets.sh
+
+# Apply, then create a one-off Job from the CronJob template
+# so the next analyzer run uses the new targets immediately
+scripts/deploy-remediation-targets.sh --trigger-job
+```
+
+The script is idempotent: it builds the ConfigMap client-side with
+`kubectl create configmap --dry-run=client -o yaml` and pipes the result
+through `kubectl apply -f -`. Override `TARGETS_FILE`, `TARGETS_NAMESPACE`,
+`TARGETS_CONFIGMAP`, `TARGETS_KEY`, or `KUBECTL` via environment if your
+deployment differs from the defaults. The CronJob picks up the new
+ConfigMap on its next scheduled run.
+
 Rewrite planning PRs create a detailed `instructions.md` for a coding agent.
 The file includes the observed cluster evidence, performance-engineering
 baseline requirements, architecture constraints, implementation guardrails,
