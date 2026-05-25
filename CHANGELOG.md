@@ -4,6 +4,7 @@ All notable changes to Cluster Optimizer will be documented in this file.
 
 ## Unreleased
 
+- Relaxed pull request changelog validation for Dependabot PRs while keeping the requirement for human-authored changes.
 - Extended `scripts/verify-deployment.sh` so deployment verification now checks that the live CronJob matches the rendered repo manifest and, when available, that the live remediation targets ConfigMap matches `config/remediation-targets.json`.
 - Added an `Update the targets ConfigMap` section to `docs/runbook.md` covering preview, apply, apply-and-trigger, verify-cluster-matches-local-file, rollback, and when-changes-take-effect for `cluster-optimizer-targets`. Added a matching row to the runbook's quick-reference table.
 - Added `scripts/deploy-remediation-targets.sh`, an idempotent helper that uploads the local (gitignored) `config/remediation-targets.json` into the `cluster-optimizer-targets` ConfigMap that the in-cluster CronJob mounts. Supports `--dry-run` for preview and `--trigger-job` to create a one-off Job from the CronJob template after upload. Closes the gap where `scripts/deploy-kubernetes.sh` deploys the binary but cannot ship the targets file because the source is gitignored.
