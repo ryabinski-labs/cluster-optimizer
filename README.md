@@ -1,35 +1,61 @@
 # Cluster Optimizer
 
-Cluster Optimizer is a read-only Kubernetes cost and capacity advisor. It
+Cluster Optimizer is a guardrailed Kubernetes cost optimization engine. It
 collects cluster shape, workload requests, optional live usage metrics, and
-disruption settings, then emits conservative recommendations that reduce waste
-without silently trading away reliability, security, or operational safety.
+disruption settings, then turns that evidence into recommendations, dry-run
+plans, GitHub pull requests, and tightly gated live remediation.
+
+It is advisory by default and operational by choice. A normal run shows what is
+wasting capacity and why. When you opt in, Cluster Optimizer can lower safe
+resource over-requests, create manifest remediation PRs, write runtime
+modernization instructions, and nudge relocatable pods off a drainable node.
+Every mutating path is narrow, auditable, reversible, and protected by explicit
+operator gates.
 
 The first deployment shape is a Kubernetes CronJob, not a DaemonSet. Cost
 optimization is cluster-scoped, so a single scheduled pod can inspect the API
-server with read-only RBAC. Running one pod per node would add cost and
-permissions without improving the analysis.
+server with a small service account. Running one pod per node would add cost
+and permissions without improving the analysis.
 
 ## Project Status
 
-Cluster Optimizer is early-stage software. The core analyzer, CronJob deployment
-examples, optional DynamoDB persistence, and local UI are available, but the
-recommendation set is intentionally conservative and should be reviewed before
-changes are applied to production workloads.
+Cluster Optimizer is early-stage software with a working analyzer, CronJob
+deployment, optional DynamoDB persistence, local operations UI, GitHub
+remediation workflows, opt-in live request trimming, and opt-in live node
+nudging. The recommendation set is intentionally conservative and should be
+reviewed before changes are applied to production workloads.
 
-Live in-cluster remediation is available as an opt-in feature behind two
-independent switches (`--auto-apply` AND `CLUSTER_OPTIMIZER_AUTOAPPLY=true`).
-The default behaviour is unchanged: advisory findings only.
+The default behavior is still advisory findings plus dry-run plans. Live
+in-cluster remediation requires explicit opt-in through independent gates, a
+remediation allowlist, persistence-backed recurrence checks, and a halt switch.
+
+## What it does today
+
+| Capability | Shipped behavior | Default mode |
+| --- | --- | --- |
+| Cluster analysis | Reads nodes, pods, workloads, HPAs, PDBs, metrics, DaemonSet overhead, and cluster fit. | Read-only |
+| Cost recommendations | Flags over-requests, under-requests, blocked drains, HPA sensitivity, PDB issues, fixed replica capacity, runtime modernization candidates, and two-node feasibility. | Advisory |
+| Trend history | Stores reports and recommendation occurrence counts in DynamoDB when configured. | Optional |
+| Operations UI | Shows reports, multi-day trends, remediation readiness, engine mode, halt status, and recent remediation activity. | Local UI |
+| Live request trimming | Patches CPU or memory requests on allowlisted Deployments, DaemonSets, and StatefulSets when all safety gates pass. | Off |
+| Active nudging | Finds a node whose relocatable pods fit elsewhere, checks PDB headroom, then can cordon and evict to encourage consolidation. | Dry-run |
+| PR-based remediation | Dispatches GitHub Actions that create manifest PRs for supported `api.yml` changes. | Opt-in |
+| Rewrite planning | Creates coding-agent instruction PRs for persistent runtime modernization candidates. | Opt-in |
+| Emergency stop | Shared halt ConfigMap stops live applier and live nudger without redeploying. | Available |
 
 ## Product Principles
 
-- Read-only by default. Live mutation requires explicit opt-in via two
-  independent gates; everything else (advisory output, dry-run plans) is the
-  default.
+- Advisory by default. Read-only collection and dry-run plans are the normal
+  path; live mutation requires explicit opt-in, allowlisted targets, recurrence
+  evidence, and a halt check.
 - Well-Architected guardrails. Every finding includes cost impact plus
   reliability, security, operational, performance, and sustainability context.
 - Evidence over guesses. Recommendations carry the observed usage, requests,
   limits, replicas, PDBs, and confidence level that produced them.
+- Small blast radius. Live request trimming is capped, floors are enforced, and
+  only one workload change is planned per CronJob tick.
+- PRs before broad automation. Manifest edits and runtime modernization plans
+  can be reviewed in application repositories before owners merge them.
 - Multi-tenant friendly. Namespaces and workload owners are first-class, and
   findings avoid cross-tenant assumptions.
 - Open-source ready. Provider-specific integrations are optional modules; the
@@ -44,6 +70,10 @@ flowchart LR
   Collector --> Analyzer
   Analyzer --> Report[JSON report / stdout]
   Analyzer --> DDB[(DynamoDB optional)]
+  Analyzer --> Planner[Safety planner]
+  Planner --> Applier[Dry-run / live applier]
+  Planner --> UI[Operations UI]
+  UI --> GH[GitHub remediation PRs]
 ```
 
 The application is intentionally small:
@@ -51,8 +81,17 @@ The application is intentionally small:
 - `collector`: reads Kubernetes objects and metrics.
 - `analyzer`: applies rules for requests, PDBs, HPA bounds, DaemonSet overhead,
   node headroom, and node-count feasibility.
-- `persistence`: stores reports in DynamoDB when configured.
-- `manifests`: read-only RBAC and CronJob deployment examples.
+- `planner`: converts eligible findings into bounded, auditable actions.
+- `applier`: dry-runs or patches safe request trims when both live gates are
+  enabled.
+- `nudger`: dry-runs or performs cordon-and-evict consolidation passes.
+- `ui`: shows trends, engine status, halt controls, readiness, and remediation
+  activity from DynamoDB.
+- `persistence`: stores reports, recommendation rollups, engine status, and
+  remediation events in DynamoDB when configured.
+- `remediators`: create GitHub PRs for supported manifest changes and rewrite
+  planning instructions.
+- `manifests`: base RBAC/CronJob examples plus optional applier RBAC.
 
 ## Quick Start
 
@@ -101,7 +140,7 @@ kubectl logs -n cluster-optimizer job/cluster-optimizer-manual
 ## Live Auto-Apply (opt-in)
 
 By default the optimizer is advisory and produces a dry-run plan. To let it
-actually mutate workload requests in-cluster you must:
+actually lower workload requests in-cluster you must:
 
 1. Apply the extra RBAC manifest (`manifests/rbac-applier.yaml`), which grants
    only the `patch` verb on `apps/deployments`, `apps/daemonsets`, and
@@ -144,10 +183,10 @@ Reverse with `halt=false` or by deleting the ConfigMap.
 ### Nudger
 
 The nudger (`--nudge` / `CLUSTER_OPTIMIZER_NUDGE=true`) reports which node
-could be drained next. It is dry-run by default; set
-`CLUSTER_OPTIMIZER_NUDGE_LIVE=true` to actually cordon and evict. It checks
-the halt switch and aborts when any candidate eviction is blocked by a PDB
-with `DisruptionsAllowed=0`.
+could be emptied next. It is dry-run by default; set
+`CLUSTER_OPTIMIZER_NUDGE_LIVE=true` to actually cordon the selected node and
+evict relocatable pods. It checks the halt switch and aborts when any candidate
+eviction is blocked by a PDB with `DisruptionsAllowed=0`.
 
 ### Recovery and operator runbook
 
@@ -195,7 +234,7 @@ aws iam attach-user-policy \
 aws iam create-access-key --user-name cluster-optimizer-doks
 ```
 
-Create the Kubernetes namespace, ServiceAccount, and read-only RBAC:
+Create the Kubernetes namespace, ServiceAccount, and base RBAC:
 
 ```bash
 kubectl apply -f manifests/rbac.yaml
@@ -211,11 +250,16 @@ kubectl create secret generic cluster-optimizer-aws \
   --from-literal=AWS_REGION=<aws-region>
 ```
 
-Deploy the DynamoDB-enabled CronJob:
+Deploy the DynamoDB-enabled CronJob example:
 
 ```bash
 kubectl apply -f examples/cronjob-dynamodb.yaml
 ```
+
+That example is configured for the full remediation engine (`--auto-apply` and
+`--nudge` plus their live environment gates). For history-only advisory runs,
+start from `manifests/cronjob.yaml`, add only `DYNAMODB_TABLE` and AWS
+credentials, and leave the live gates commented out.
 
 Without `DYNAMODB_TABLE`, the optimizer writes the report to stdout only.
 With `DYNAMODB_TABLE`, it writes the same report to DynamoDB after printing it.
@@ -313,8 +357,9 @@ in-cluster:
 ## Remediation Workflow
 
 Remediation remains opt-in. The local UI shows recurring recommendation trends,
-but the `Remediate` button is disabled until the same workload/rule has been
-seen for at least `MIN_REMEDIATION_DAYS` days. The default is `3`.
+engine mode, halt status, and recent remediation activity. The `Remediate`
+button is disabled until the same workload/rule has been seen for at least
+`MIN_REMEDIATION_DAYS` days. The default is `3`.
 
 Supported first-pass remediations are intentionally narrow:
 
@@ -446,9 +491,11 @@ Implemented checks:
 - cert-manager HTTP-01 solver hygiene.
 - Two-node feasibility estimate for current node shape.
 
-Non-goals for the first release:
+Current non-goals:
 
-- Automatic patching or node scaling.
+- Live mutation by default.
+- Unbounded automatic patching.
+- Direct cloud-provider node deletion or node-pool resizing.
 - Provider billing ingestion.
 - Long-horizon percentile analysis without a persistence backend.
 - Mutating admission webhooks or policy enforcement.
