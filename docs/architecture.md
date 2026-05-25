@@ -2,12 +2,13 @@
 
 ## Decision
 
-Use a read-only CronJob plus optional DynamoDB persistence for the first
-release. A CronJob is cheaper and simpler than a DaemonSet for cluster-scoped
-analysis, and read-only recommendations preserve operator control.
+Use a scheduled CronJob with read-oriented collection, optional DynamoDB
+persistence, a local operations UI, and opt-in remediation executors. A CronJob
+is cheaper and simpler than a DaemonSet for cluster-scoped analysis, and
+advisory-by-default recommendations preserve operator control.
 
 Live in-cluster remediation is available as an opt-in capability layered on
-top of the read-only core. The default behaviour remains advisory: live
+top of the advisory core. The default behaviour remains advisory: live
 mutation requires two independent gates AND a halt-ConfigMap check.
 
 ## Alternatives Considered
@@ -17,7 +18,9 @@ mutation requires two independent gates AND a halt-ConfigMap check.
 | CronJob collector | Low cost, simple RBAC, easy logs, natural snapshots | Not real-time | Chosen for MVP |
 | Long-running Deployment | Can expose API/UI later, easier watch loops | More operational surface | Later |
 | DaemonSet | Node-local visibility, per-node diagnostics | Higher cost, duplicate API reads, broader footprint | Not needed for MVP |
-| Mutating controller | Can apply savings automatically | High reliability/security risk | Explicitly out of scope |
+| Mutating controller | Can apply savings automatically | High reliability/security risk, hidden control loop, broad blast radius | Explicitly out of scope |
+| Guardrailed executor | Can apply narrow actions after evidence and opt-in gates | More operational documentation and rollback paths | Chosen for request trims and nudging |
+| GitHub PR remediation | Lets owners review manifest changes in their app repos | Requires repo mappings and token setup | Chosen for broader manifest edits |
 
 ## Components
 
@@ -50,16 +53,21 @@ mutation requires two independent gates AND a halt-ConfigMap check.
 - Persistence adapter (`internal/store`): writes reports and recommendation
   occurrence counts to DynamoDB when configured. Occurrence counts are the
   evidence source the planner uses to verify multi-run agreement before
-  live mutation.
-- Manifests: base read-only RBAC + CronJob, plus optional
+  live mutation. It also stores engine status and remediation events for the
+  UI.
+- Local UI (`cmd/cluster-optimizer-ui`): reads reports, rollups, engine status,
+  and remediation history from DynamoDB; exposes remediation readiness and
+  dispatches GitHub remediation workflows when configured.
+- Manifests: base RBAC + CronJob, plus optional
   `manifests/rbac-applier.yaml` for the patch verb when auto-apply is
   enabled.
 
 ## Well-Architected Review
 
-- Operational excellence: reports are explicit, scheduled, and testable; no
-  hidden mutation.
-- Security: read-only RBAC, non-root container, no Secret value access.
+- Operational excellence: reports are explicit, scheduled, and testable; live
+  paths emit dry-run output, audit events, and rollback-friendly logs.
+- Security: read-oriented base RBAC, optional patch-only applier RBAC,
+  non-root container, no Secret value access.
 - Reliability: recommendations do not reduce replicas or requests without
   evidence and risk context.
 - Performance efficiency: analyzes scheduling requests, actual metrics, and
@@ -78,7 +86,7 @@ mutation requires two independent gates AND a halt-ConfigMap check.
 | One short metrics sample can mislead sizing | High | Mark confidence, recommend multi-day p95/p99 validation |
 | Operator forgets the kill switch exists | Medium | Documented in README + runbook; applier logs reference the halt ConfigMap path on every run |
 | Nudger cordons a node that would violate a PDB | Medium | Pre-flight: lists matching PDBs and aborts if `DisruptionsAllowed=0`; PDB list errors are also treated as blockers |
-| RBAC drift adds patch verbs to wrong role | Medium | Applier RBAC split into separate `rbac-applier.yaml`; base `rbac.yaml` has read-only + node-update + pods/eviction only |
+| RBAC drift adds patch verbs to wrong role | Medium | Applier RBAC split into separate `rbac-applier.yaml`; base `rbac.yaml` has read/list/watch plus node-update and pods/eviction for nudging only |
 | Provider-specific node pricing is absent | Medium | Keep cost effect qualitative until provider adapters ship |
 | PDB percentage/matchExpression edge cases | Medium | Support percentages now; add matchExpression support next |
 | DynamoDB unavailable → no occurrence count, no rollback log | Medium | Planner refuses live action without persistence; advisory output continues to work via stdout |
@@ -88,7 +96,6 @@ mutation requires two independent gates AND a halt-ConfigMap check.
 
 1. Add provider adapters for DOKS/EKS/GKE/AKS node pricing and node-pool min/max.
 2. Add Prometheus/VPA adapters for historical p95/p99 usage.
-3. Add GitOps output: suggested patches/PR templates instead of live mutation.
+3. Expand GitOps output beyond the current `api.yml` remediation workflows.
 4. Add a small UI/API Deployment mode backed by DynamoDB.
 5. Add policy packs for tenant-specific availability rules.
-
