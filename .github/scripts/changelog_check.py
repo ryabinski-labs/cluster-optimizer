@@ -12,6 +12,7 @@ from pathlib import Path
 
 CHANGELOG = "CHANGELOG.md"
 UNRELEASED_HEADING = "## Unreleased"
+CHANGELOG_OPTIONAL_AUTHORS = {"dependabot[bot]"}
 
 
 def run_git(args: list[str], repo: Path) -> str:
@@ -82,7 +83,7 @@ def validate_changelog(repo: Path) -> list[str]:
     return errors
 
 
-def check(repo: Path, base_ref: str | None, event_name: str | None) -> int:
+def check(repo: Path, base_ref: str | None, event_name: str | None, pr_author: str | None) -> int:
     errors = validate_changelog(repo)
     if errors:
         for error in errors:
@@ -91,6 +92,10 @@ def check(repo: Path, base_ref: str | None, event_name: str | None) -> int:
 
     if event_name != "pull_request":
         print("Changelog structure is valid; update requirement only applies to pull requests.")
+        return 0
+
+    if pr_author in CHANGELOG_OPTIONAL_AUTHORS:
+        print(f"Changelog structure is valid; update requirement skipped for {pr_author}.")
         return 0
 
     if not base_ref:
@@ -124,10 +129,11 @@ def main() -> int:
     parser.add_argument("repo", nargs="?", default=".", help="repository path")
     parser.add_argument("--base-ref", default=os.environ.get("GITHUB_BASE_REF"), help="base branch for PR comparison")
     parser.add_argument("--event-name", default=os.environ.get("GITHUB_EVENT_NAME"), help="GitHub event name")
+    parser.add_argument("--pr-author", default=os.environ.get("GITHUB_PR_AUTHOR"), help="pull request author login")
     args = parser.parse_args()
 
     try:
-        return check(Path(args.repo).resolve(), args.base_ref, args.event_name)
+        return check(Path(args.repo).resolve(), args.base_ref, args.event_name, args.pr_author)
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
