@@ -1,21 +1,108 @@
 # Cluster Optimizer
 
-Cluster Optimizer is a guardrailed Kubernetes cost optimization engine. It
-collects cluster shape, workload requests, optional live usage metrics, and
+> **Find — and safely fix — Kubernetes resource waste.** Built for platform and
+> SRE teams, advisory by default, with tightly gated, reversible opt-in
+> remediation — so you can cut spend without risking reliability. No agents on
+> every node, no mutating webhooks, no surprises.
+
+[![CI](https://github.com/GipsyChef/cluster-optimizer/actions/workflows/ci.yml/badge.svg)](https://github.com/GipsyChef/cluster-optimizer/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+[![Go 1.25](https://img.shields.io/badge/Go-1.25-00ADD8.svg?logo=go&logoColor=white)](https://go.dev/)
+[![Status: early-stage](https://img.shields.io/badge/status-early--stage-yellow.svg)](#project-status)
+
+Cluster Optimizer is a guardrailed Kubernetes cost-and-capacity engine. It reads
+your cluster shape, workload requests, optional live usage metrics, and
 disruption settings, then turns that evidence into recommendations, dry-run
-plans, GitHub pull requests, and tightly gated live remediation.
+plans, GitHub pull requests, and — only when you opt in — narrow live fixes.
 
-It is advisory by default and operational by choice. A normal run shows what is
-wasting capacity and why. When you opt in, Cluster Optimizer can lower safe
-resource over-requests, create manifest remediation PRs, write runtime
-modernization instructions, and nudge relocatable pods off a drainable node.
-Every mutating path is narrow, auditable, reversible, and protected by explicit
-operator gates.
+A normal run is **read-only** and tells you what is wasting capacity and why.
+When you choose to act, it can lower safe over-requests, open manifest
+remediation PRs, write runtime-modernization instructions, and nudge relocatable
+pods off a drainable node. Every mutating path is narrow, auditable, reversible,
+and behind explicit operator gates.
 
-The first deployment shape is a Kubernetes CronJob, not a DaemonSet. Cost
-optimization is cluster-scoped, so a single scheduled pod can inspect the API
-server with a small service account. Running one pod per node would add cost
-and permissions without improving the analysis.
+It deploys as a single scheduled **CronJob**, not a DaemonSet. Cost optimization
+is cluster-scoped, so one pod with a small service account can inspect the API
+server. A pod per node would add cost and permissions without improving the
+analysis.
+
+## At a glance
+
+| | |
+| --- | --- |
+| **What it is** | A Kubernetes cost & capacity optimizer (CLI + CronJob + local UI) |
+| **What it does** | Flags over/under-requested workloads, risky PDBs/HPAs, DaemonSet overhead, and node-count feasibility |
+| **Default mode** | Read-only analysis and dry-run plans — nothing is changed |
+| **Opt-in** | Capped live request trimming, manifest PRs, rewrite-planning PRs, node consolidation nudges |
+| **Safety** | Allowlists, recurrence checks, confidence floors, trim caps, and a global halt switch |
+| **Runs on** | Any standard Kubernetes cluster (built and tested against DOKS) |
+| **License** | Apache 2.0 |
+
+## Who it's for
+
+- **Platform / DevOps / SRE teams** running multi-tenant Kubernetes who want to
+  cut spend without risking reliability.
+- **Engineers reviewing resource requests** who want evidence (observed usage vs.
+  requests, replica counts, PDB/HPA state) instead of guesses.
+- **Cost-conscious teams on managed Kubernetes** (e.g. DigitalOcean DOKS, EKS,
+  GKE) looking for safe, reviewable rightsizing rather than aggressive autoscaling.
+
+If you want a tool that *recommends first* and only acts behind explicit gates,
+this is built for you.
+
+## See it run
+
+A read-only run against your current kubeconfig prints what's wasting capacity
+and why:
+
+```text
+$ go run ./cmd/cluster-optimizer --output text
+
+Cluster: prod-blr1
+Generated: 2026-05-29T14:02:11Z
+
+Summary:
+- node_count: 4
+- instance_types: [s-4vcpu-8gb]
+- active_pods: 37
+- allocatable_cpu_m: 12000
+- requested_cpu_m: 4150
+- observed_cpu_m: 1820
+- requested_memory_mib: 9472
+- observed_memory_mib: 4060
+- two_node_estimate: map[feasible:true projected_cpu_m:3900 projected_memory_mib:7100]
+
+Findings:
+- [medium] default/api cpu-request-over-provisioned: Lower CPU request toward observed usage.
+  Evidence: requests 500m, observed ~120m across 3 replicas
+  Risk: low — 50% trim cap and 10m floor enforced; change is reversible
+- [low] default/worker fixed-replica-capacity-without-autoscaler: Consider an HPA/KEDA scaler.
+  Evidence: 3 fixed replicas, observed ~40m CPU per replica, no HPA
+  Risk: low — advisory only, no automatic change
+```
+
+Add DynamoDB and the local UI to track these findings over time and unlock gated
+remediation — see [Quick Start](#quick-start).
+
+## Is this the right tool?
+
+**Use this when you want to:**
+
+- Right-size CPU/memory requests with evidence and a safe, reversible change path.
+- Catch reliability foot-guns — missing/over-permissive PDBs, `min == max` HPAs,
+  CPU HPAs without CPU requests — alongside cost findings.
+- Keep humans in the loop via dry-run plans and pull requests before anything merges.
+- Run cost analysis on a schedule with a tiny footprint and least-privilege RBAC.
+
+**Not a fit when you want:**
+
+- Fully autonomous, unattended rightsizing with no review step.
+- Direct cloud-provider node deletion or node-pool resizing (out of scope).
+- A mutating admission webhook or in-line policy enforcement.
+- Provider billing ingestion or long-horizon percentile analysis without a
+  persistence backend.
+
+For the precise list of implemented checks and non-goals, see [Current Scope](#current-scope).
 
 ## Project Status
 
