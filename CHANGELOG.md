@@ -4,6 +4,7 @@ All notable changes to Cluster Optimizer will be documented in this file.
 
 ## Unreleased
 
+- Rebuilt the README first screen for faster evaluation and discoverability: added a tagline, status/CI/license/Go badges, an "At a glance" table, a "Who it's for" audience section, a sample read-only run, and explicit "use this when / not a fit when" guidance — all existing reference material is preserved below the fold. Also refreshed the GitHub repository description (which still described the tool as read-only) and added discovery topics, since the repository previously had none.
 - Updated the README, PRD, and architecture docs to describe Cluster Optimizer as advisory-by-default with opt-in guardrailed remediation, including live request trimming, active nudging, GitHub PR remediation, rewrite planning, UI status, and the shared halt switch.
 - Relaxed pull request changelog validation for Dependabot PRs while keeping the requirement for human-authored changes.
 - Extended `scripts/verify-deployment.sh` so deployment verification now checks that the live CronJob matches the rendered repo manifest and, when available, that the live remediation targets ConfigMap matches `config/remediation-targets.json`.
