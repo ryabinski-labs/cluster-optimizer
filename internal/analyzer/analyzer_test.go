@@ -61,6 +61,100 @@ func TestDetectsMemoryRequestBelowUsage(t *testing.T) {
 	t.Fatalf("memory finding missing: %#v", report.Findings)
 }
 
+// TestSkipsMemoryOverProvisionedWhenPerReplicaRequestReasonable is a regression
+// test for the recurring "lower memory request to 128Mi" recommendation that
+// never resolved. Requests and usage in the snapshot are fleet totals summed
+// across replicas, so a workload whose per-pod request is already a reasonable
+// 128Mi must not be flagged just because it runs several replicas
+// (2x128=256Mi, 3x128=384Mi fleet totals). Applying the per-pod 128Mi target
+// the UI derives from such a finding is a no-op, so the finding would otherwise
+// recur on every analyzer run forever.
+func TestSkipsMemoryOverProvisionedWhenPerReplicaRequestReasonable(t *testing.T) {
+	cases := []struct {
+		name     string
+		replicas int32
+		request  int64 // fleet total across all replicas
+		usage    int64 // fleet total across all replicas
+	}{
+		{"echothread-api two replicas at 128Mi", 2, 256, 47},
+		{"tovinio-backend three replicas at 128Mi", 3, 384, 66},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			usage := tc.usage
+			snapshot := model.Snapshot{
+				ClusterID:  "default",
+				CapturedAt: time.Now(),
+				Workloads: []model.Workload{{
+					Namespace: "default", Name: "api", Kind: "Deployment", Replicas: tc.replicas,
+					Labels: map[string]string{"app": "api"}, Selector: map[string]string{"app": "api"},
+					RequestsMemoryMiB: tc.request, UsageMemoryMiB: &usage,
+				}},
+			}
+			for _, finding := range Analyze(snapshot).Findings {
+				if finding.RuleID == "memory-request-over-provisioned" {
+					t.Fatalf("per-replica request is already reasonable; rule must not fire: %#v", finding)
+				}
+			}
+		})
+	}
+}
+
+// TestDetectsMemoryOverProvisionedUsesPerReplicaEvidence verifies a genuinely
+// over-provisioned workload (512Mi per pod, ~50Mi used) still fires and that the
+// evidence reports per-replica values, so the remediation target derived from
+// the evidence is a per-container value rather than a fleet total.
+func TestDetectsMemoryOverProvisionedUsesPerReplicaEvidence(t *testing.T) {
+	usage := int64(150) // fleet total across 3 replicas => 50Mi per pod
+	snapshot := model.Snapshot{
+		ClusterID:  "default",
+		CapturedAt: time.Now(),
+		Workloads: []model.Workload{{
+			Namespace: "default", Name: "api", Kind: "Deployment", Replicas: 3,
+			Labels: map[string]string{"app": "api"}, Selector: map[string]string{"app": "api"},
+			RequestsMemoryMiB: 1536, UsageMemoryMiB: &usage, // 512Mi per pod
+		}},
+	}
+	var found bool
+	for _, finding := range Analyze(snapshot).Findings {
+		if finding.RuleID != "memory-request-over-provisioned" {
+			continue
+		}
+		found = true
+		if !strings.Contains(finding.Evidence, "request 512Mi") || !strings.Contains(finding.Evidence, "Observed memory 50Mi") {
+			t.Fatalf("evidence should report per-replica values (50Mi used, 512Mi request), got: %q", finding.Evidence)
+		}
+		if strings.Contains(finding.Evidence, "1536Mi") {
+			t.Fatalf("evidence must not report the fleet-total request (1536Mi), got: %q", finding.Evidence)
+		}
+	}
+	if !found {
+		t.Fatalf("expected a memory-request-over-provisioned finding for a per-pod over-provisioned workload")
+	}
+}
+
+// TestSkipsCPUOverProvisionedWhenPerReplicaRequestReasonable guards the same
+// fleet-total-vs-per-replica bug on the CPU path: 2 replicas x 100m request
+// (200m fleet) with 15m used per pod leaves an 85m per-pod gap, below the 100m
+// threshold, so the rule must stay quiet.
+func TestSkipsCPUOverProvisionedWhenPerReplicaRequestReasonable(t *testing.T) {
+	cpu := int64(30) // fleet total across 2 replicas => 15m per pod
+	snapshot := model.Snapshot{
+		ClusterID:  "default",
+		CapturedAt: time.Now(),
+		Workloads: []model.Workload{{
+			Namespace: "default", Name: "api", Kind: "Deployment", Replicas: 2,
+			Labels: map[string]string{"app": "api"}, Selector: map[string]string{"app": "api"},
+			RequestsCPUm: 200, UsageCPUm: &cpu,
+		}},
+	}
+	for _, finding := range Analyze(snapshot).Findings {
+		if finding.RuleID == "cpu-request-over-provisioned" {
+			t.Fatalf("per-replica CPU request is reasonable; rule must not fire: %#v", finding)
+		}
+	}
+}
+
 func TestSkipsCPURecommendationWhenCPUMetricsMissing(t *testing.T) {
 	mem := int64(128)
 	snapshot := model.Snapshot{
@@ -238,10 +332,13 @@ func TestAnalyzeWithTagsProviderManagedAndRemediable(t *testing.T) {
 				RequestsCPUm: 100, RequestsMemoryMiB: 512, UsageMemoryMiB: &mem,
 			},
 			{
+				// Per replica this is 512Mi requested vs ~16Mi used, so the
+				// over-provisioned rule fires; the assertions below verify it is
+				// tagged provider-managed and non-remediable.
 				Namespace: "kube-system", Name: "kube-proxy", Kind: "DaemonSet", Replicas: 3,
 				Labels:       map[string]string{"k8s-app": "kube-proxy"},
 				Selector:     map[string]string{"k8s-app": "kube-proxy"},
-				RequestsCPUm: 100, RequestsMemoryMiB: 375, UsageMemoryMiB: &mem,
+				RequestsCPUm: 300, RequestsMemoryMiB: 1536, UsageMemoryMiB: &mem,
 			},
 		},
 	}
