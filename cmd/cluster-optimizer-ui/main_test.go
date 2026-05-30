@@ -52,6 +52,40 @@ func TestNeedsResourceTargetExcludesHPASensitivity(t *testing.T) {
 	}
 }
 
+// TestRemediationTargetsFromEvidenceProposesRealReductions locks the invariant
+// that, given per-replica evidence (the analyzer now emits per-pod values), the
+// memory/CPU over-provisioned targets are a strict reduction below the parsed
+// per-pod request and the below-usage target is an increase above observed
+// usage. A target equal to the current request would be a no-op recommendation
+// that recurs forever, which is the defect this guards against.
+func TestRemediationTargetsFromEvidenceProposesRealReductions(t *testing.T) {
+	// memory over-provisioned: max(128, 50*3/2=75)=128, capped at 512*0.8=409,
+	// rounded up to 16 => 128Mi, a real reduction below the 512Mi per-pod request.
+	if _, mem := remediationTargetsFromEvidence(
+		"memory-request-over-provisioned",
+		"Observed memory 50Mi is less than half of request 512Mi.",
+	); mem != "128Mi" {
+		t.Fatalf("memory over-provisioned target = %q, want 128Mi (a reduction below 512Mi)", mem)
+	}
+
+	// cpu over-provisioned: max(50, 15*3=45)=50, capped at 100*0.7=70, floor 25,
+	// rounded up to 5 => 50m, a real reduction below the 100m per-pod request.
+	if cpu, _ := remediationTargetsFromEvidence(
+		"cpu-request-over-provisioned",
+		"Observed CPU 15m is materially below request 100m.",
+	); cpu != "50m" {
+		t.Fatalf("cpu over-provisioned target = %q, want 50m (a reduction below 100m)", cpu)
+	}
+
+	// below-usage: 300*5/4=375, rounded up to 16 => 384Mi, above observed usage.
+	if _, mem := remediationTargetsFromEvidence(
+		"memory-request-below-usage",
+		"Observed memory 300Mi exceeds request 128Mi.",
+	); mem != "384Mi" {
+		t.Fatalf("below-usage target = %q, want 384Mi (above observed 300Mi usage)", mem)
+	}
+}
+
 func TestRemediationHistoryRejectsInvalidLimit(t *testing.T) {
 	srv := &server{}
 	cases := []string{"abc", "0", "999"}

@@ -169,32 +169,49 @@ func twoNodeEstimate(snapshot model.Snapshot, reqCPU, reqMem, dsCPU, dsMem int64
 func analyzeUsage(workloads []model.Workload, hpas []model.HPA) []Finding {
 	var findings []Finding
 	for _, workload := range workloads {
+		// Requests and usage in the snapshot are fleet totals summed across
+		// every replica (see collector.aggregatePods). Compare on a per-replica
+		// basis so a workload whose per-pod request is already reasonable is not
+		// flagged as over-provisioned purely because it runs several replicas
+		// (e.g. 2 replicas x 128Mi reads as a 256Mi request). The remediation
+		// target derived from this evidence and the patch the planner applies
+		// are both per container, so the evidence must be per replica too; this
+		// also mirrors the per-replica math already used by
+		// analyzeRuntimeModernization, analyzeHPASensitivity, and
+		// plan.planRequestTrim. Without a known replica count the per-pod values
+		// are undefined, so skip the workload.
+		replicas := int64(workload.Replicas)
+		if replicas < 1 {
+			continue
+		}
 		if workload.UsageMemoryMiB != nil {
-			usageMem := *workload.UsageMemoryMiB
-			if workload.RequestsMemoryMiB > 0 && usageMem > workload.RequestsMemoryMiB*12/10 && usageMem-workload.RequestsMemoryMiB > 64 {
+			usageMem := *workload.UsageMemoryMiB / replicas
+			requestMem := workload.RequestsMemoryMiB / replicas
+			if requestMem > 0 && usageMem > requestMem*12/10 && usageMem-requestMem > 64 {
 				findings = append(findings, finding("memory-request-below-usage", "high", workload,
-					fmt.Sprintf("Observed memory %s exceeds request %s.", quantity.FormatMiB(usageMem), quantity.FormatMiB(workload.RequestsMemoryMiB)),
+					fmt.Sprintf("Observed memory %s exceeds request %s.", quantity.FormatMiB(usageMem), quantity.FormatMiB(requestMem)),
 					"Raise memory request to at least observed p95 plus headroom before consolidation.",
 					"Prevents false bin-packing that causes evictions; may increase requested capacity.",
 					"Medium: request increases can delay node reduction but improve reliability.", "medium"))
 			}
-			if workload.RequestsMemoryMiB > 0 && usageMem < workload.RequestsMemoryMiB/2 && workload.RequestsMemoryMiB-usageMem > 128 {
+			if requestMem > 0 && usageMem < requestMem/2 && requestMem-usageMem > 128 {
 				findings = append(findings, finding("memory-request-over-provisioned", "medium", workload,
-					fmt.Sprintf("Observed memory %s is less than half of request %s.", quantity.FormatMiB(usageMem), quantity.FormatMiB(workload.RequestsMemoryMiB)),
+					fmt.Sprintf("Observed memory %s is less than half of request %s.", quantity.FormatMiB(usageMem), quantity.FormatMiB(requestMem)),
 					"Review multi-day p95/p99 memory and lower request only if peaks support it.",
 					"May unlock bin-packing and node scale-down.",
 					"Medium: memory reductions need peak and OOM evidence.", "low"))
 			}
 		}
 		if workload.UsageCPUm != nil {
-			usageCPU := *workload.UsageCPUm
-			if usageCPU > 0 && workload.RequestsCPUm > 0 && usageCPU < workload.RequestsCPUm/5 && workload.RequestsCPUm-usageCPU > 100 {
+			usageCPU := *workload.UsageCPUm / replicas
+			requestCPU := workload.RequestsCPUm / replicas
+			if usageCPU > 0 && requestCPU > 0 && usageCPU < requestCPU/5 && requestCPU-usageCPU > 100 {
 				recommendation := "Lower CPU request after checking latency and throttling metrics."
 				if hpa := cpuUtilizationHPAForWorkload(workload, hpas); hpa != nil {
 					recommendation = "Lower CPU request only with matching HPA retuning; preserve the intended scale-up point with an absolute averageValue target or a higher CPU request, then validate latency and throttling metrics."
 				}
 				findings = append(findings, finding("cpu-request-over-provisioned", "medium", workload,
-					fmt.Sprintf("Observed CPU %s is materially below request %s.", quantity.FormatCPU(usageCPU), quantity.FormatCPU(workload.RequestsCPUm)),
+					fmt.Sprintf("Observed CPU %s is materially below request %s.", quantity.FormatCPU(usageCPU), quantity.FormatCPU(requestCPU)),
 					recommendation,
 					"Improves schedulable CPU headroom and HPA sensitivity.",
 					"Low/medium: CPU is compressible, but latency-sensitive paths need throttling checks.", "low"))
