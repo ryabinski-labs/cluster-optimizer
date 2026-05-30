@@ -56,6 +56,23 @@ require_command() {
   fi
 }
 
+resolve_local_path() {
+  local path="$1"
+
+  case "${path}" in
+    /*)
+      printf '%s\n' "${path}"
+      ;;
+    *)
+      if [ -e "${path}" ]; then
+        printf '%s\n' "${path}"
+      else
+        printf '%s/%s\n' "${REPO_ROOT}" "${path}"
+      fi
+      ;;
+  esac
+}
+
 latest_published_image_tag() {
   gh run list \
     --workflow "Publish Image" \
@@ -120,6 +137,8 @@ verify_targets_config_sync() {
 IMAGE_TAG=""
 EXPECTING_LATEST=true
 RUN_JOB=false
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -198,6 +217,9 @@ if [ -z "${CONFIG_MANIFEST:-}" ]; then
     CONFIG_MANIFEST="manifests/cronjob.yaml"
   fi
 fi
+
+CONFIG_MANIFEST="$(resolve_local_path "${CONFIG_MANIFEST}")"
+TARGETS_FILE="$(resolve_local_path "${TARGETS_FILE}")"
 
 if [ -z "${IMAGE_TAG}" ]; then
   echo "Checking whether the latest published version is deployed..."
