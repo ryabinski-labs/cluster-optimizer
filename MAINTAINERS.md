@@ -6,6 +6,6 @@ Maintainers can merge pull requests to the default branch after required CI/stat
 
 | Name | GitHub | Email | Role |
 |---|---|---|---|
-| Cigan | `@GipsyChef` | `cigan1@gmail.com` | Maintainer |
+| Yoni Ryabinski | `@cigan1` | `cigan1@gmail.com` | Maintainer |
 
 Copyright 2026 Cluster Optimizer Contributors.
