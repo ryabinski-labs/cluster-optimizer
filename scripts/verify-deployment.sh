@@ -16,7 +16,7 @@ Environment overrides:
   GITHUB_REF     Git ref used to resolve the latest published image. Default: main
   NAMESPACE      Kubernetes namespace. Default: cluster-optimizer
   CRONJOB        CronJob name. Default: cluster-optimizer
-  IMAGE_NAME     Image repository. Default: ghcr.io/gipsychef/cluster-optimizer
+  IMAGE_NAME     Image repository. Default: ghcr.io/ryabinski-labs/cluster-optimizer
   VERIFY_JOB     One-off job name. Default: cluster-optimizer-deploy-verify
   ENABLE_DYNAMODB
                  Use examples/cronjob-dynamodb.yaml as the expected manifest.
@@ -174,7 +174,7 @@ require_command gh
 GITHUB_REF="${GITHUB_REF:-main}"
 NAMESPACE="${NAMESPACE:-cluster-optimizer}"
 CRONJOB="${CRONJOB:-cluster-optimizer}"
-IMAGE_NAME="${IMAGE_NAME:-ghcr.io/gipsychef/cluster-optimizer}"
+IMAGE_NAME="${IMAGE_NAME:-ghcr.io/ryabinski-labs/cluster-optimizer}"
 VERIFY_JOB="${VERIFY_JOB:-cluster-optimizer-deploy-verify}"
 ENABLE_DYNAMODB="${ENABLE_DYNAMODB:-true}"
 CLUSTER_ID="${CLUSTER_ID:-default}"

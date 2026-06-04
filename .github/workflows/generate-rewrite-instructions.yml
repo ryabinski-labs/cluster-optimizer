@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       repository:
-        description: Target repository, for example GipsyChef/echothread.
+        description: Target repository, for example ryabinski-labs/echothread.
         required: true
         type: string
       instructions_path:

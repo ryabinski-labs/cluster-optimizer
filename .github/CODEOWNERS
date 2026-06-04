@@ -1,12 +1,12 @@
 # CODEOWNERS documents ownership for sensitive paths. Branch protection should
 # require status checks and restrict default-branch updates to maintainers.
 
-* @GipsyChef
+* @ryabinski-labs
 
-/.github/ @GipsyChef
-/SECURITY.md @GipsyChef
-/MAINTAINERS.md @GipsyChef
-/infra/ @GipsyChef
-/manifests/ @GipsyChef
-/examples/ @GipsyChef
-/internal/store/ @GipsyChef
+/.github/ @ryabinski-labs
+/SECURITY.md @ryabinski-labs
+/MAINTAINERS.md @ryabinski-labs
+/infra/ @ryabinski-labs
+/manifests/ @ryabinski-labs
+/examples/ @ryabinski-labs
+/internal/store/ @ryabinski-labs
