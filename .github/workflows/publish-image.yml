@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: ghcr.io/gipsychef/cluster-optimizer
+  IMAGE_NAME: ghcr.io/ryabinski-labs/cluster-optimizer
 
 jobs:
   publish:

@@ -5,7 +5,7 @@
 > remediation — so you can cut spend without risking reliability. No agents on
 > every node, no mutating webhooks, no surprises.
 
-[![CI](https://github.com/GipsyChef/cluster-optimizer/actions/workflows/ci.yml/badge.svg)](https://github.com/GipsyChef/cluster-optimizer/actions/workflows/ci.yml)
+[![CI](https://github.com/ryabinski-labs/cluster-optimizer/actions/workflows/ci.yml/badge.svg)](https://github.com/ryabinski-labs/cluster-optimizer/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 [![Go 1.25](https://img.shields.io/badge/Go-1.25-00ADD8.svg?logo=go&logoColor=white)](https://go.dev/)
 [![Status: early-stage](https://img.shields.io/badge/status-early--stage-yellow.svg)](#project-status)
@@ -203,8 +203,8 @@ window, which defaults to three days.
 Build and publish the image:
 
 ```bash
-docker build -t ghcr.io/gipsychef/cluster-optimizer:0.1.0 .
-docker push ghcr.io/gipsychef/cluster-optimizer:0.1.0
+docker build -t ghcr.io/ryabinski-labs/cluster-optimizer:0.1.0 .
+docker push ghcr.io/ryabinski-labs/cluster-optimizer:0.1.0
 ```
 
 Run in-cluster without persistence:
@@ -359,7 +359,7 @@ AWS infrastructure, Kubernetes deployment, and opt-in remediation pull requests:
 - `.github/workflows/ci.yml`: runs `go mod tidy`, `go test ./...`, and
   `go vet ./...`.
 - `.github/workflows/publish-image.yml`: builds and pushes
-  `ghcr.io/gipsychef/cluster-optimizer`.
+  `ghcr.io/ryabinski-labs/cluster-optimizer`.
 - `.github/workflows/deploy-infra.yml`: deploys the DynamoDB table and the
   DynamoDB writer IAM policy.
 - `.github/workflows/deploy-kubernetes.yml`: deploys the Kubernetes RBAC,
@@ -394,7 +394,7 @@ Repository secrets:
   only if the GHCR package is private.
 - `REMEDIATION_GITHUB_TOKEN`: GitHub token that can checkout, push branches to,
   and create pull requests in target application repositories such as
-  `GipsyChef/echothread`.
+  `ryabinski-labs/echothread`.
 
 Create the kubeconfig secret only when the runner does not already have cluster
 access:
