@@ -7,6 +7,7 @@ import (
 	"github.com/GipsyChef/cluster-optimizer/internal/applier"
 	"github.com/GipsyChef/cluster-optimizer/internal/nudger"
 	"github.com/GipsyChef/cluster-optimizer/internal/plan"
+	"github.com/GipsyChef/cluster-optimizer/internal/podgc"
 )
 
 func TestApplierEventsCaptureBeforeAfterAndMode(t *testing.T) {
@@ -86,6 +87,68 @@ func TestNudgerEventCapturesTargetAndEvictionCounts(t *testing.T) {
 
 func TestNudgerEventPreservesHaltReason(t *testing.T) {
 	event, ok := nudgerEvent(nudger.Result{Mode: "live", Halted: true, HaltReason: "halt=true"}, time.Now())
+	if !ok {
+		t.Fatal("expected event when halted")
+	}
+	if !event.HaltActive || event.Reason != "halt=true" {
+		t.Errorf("expected halt fields set, got %+v", event)
+	}
+}
+
+func TestPodGCEventSkipsEmptyPass(t *testing.T) {
+	if _, ok := podGCEvent(podgc.Result{Mode: "dry-run"}, time.Now()); ok {
+		t.Fatal("expected empty pass (no candidates, no halt) to be skipped")
+	}
+}
+
+func TestPodGCEventCapturesDeletions(t *testing.T) {
+	event, ok := podGCEvent(podgc.Result{
+		Mode:       "live",
+		Namespace:  "default",
+		Candidates: 3,
+		Deleted:    3,
+	}, time.Now())
+	if !ok {
+		t.Fatal("expected event for non-empty pass")
+	}
+	if event.Kind != "delete_completed_pod" {
+		t.Errorf("expected delete_completed_pod kind, got %q", event.Kind)
+	}
+	if event.Namespace != "default" || event.Deleted != 3 {
+		t.Errorf("unexpected event payload: %+v", event)
+	}
+	if !event.Applied {
+		t.Error("expected live deletion with no errors to be marked applied")
+	}
+}
+
+// All-namespaces runs must leave Namespace empty rather than stuffing a human
+// label like "all namespaces" into the structured namespace field (Finding A).
+func TestPodGCEventAllNamespacesLeavesNamespaceEmpty(t *testing.T) {
+	event, ok := podGCEvent(podgc.Result{Mode: "dry-run", Namespace: "", Candidates: 2}, time.Now())
+	if !ok {
+		t.Fatal("expected event when candidates present")
+	}
+	if event.Namespace != "" {
+		t.Errorf("expected empty namespace for all-namespaces run, got %q", event.Namespace)
+	}
+}
+
+func TestPodGCEventNotAppliedOnDeletionErrors(t *testing.T) {
+	event, ok := podGCEvent(podgc.Result{Mode: "live", Candidates: 2, Deleted: 1, DeletionErrors: 1}, time.Now())
+	if !ok {
+		t.Fatal("expected event for non-empty pass")
+	}
+	if event.Applied {
+		t.Error("expected Applied=false when a deletion errored")
+	}
+	if event.DeletionErrors != 1 {
+		t.Errorf("expected deletion errors captured, got %+v", event)
+	}
+}
+
+func TestPodGCEventPreservesHaltReason(t *testing.T) {
+	event, ok := podGCEvent(podgc.Result{Mode: "live", Halted: true, HaltReason: "halt=true"}, time.Now())
 	if !ok {
 		t.Fatal("expected event when halted")
 	}

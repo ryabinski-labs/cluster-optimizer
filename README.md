@@ -172,6 +172,7 @@ The application is intentionally small:
 - `applier`: dry-runs or patches safe request trims when both live gates are
   enabled.
 - `nudger`: dry-runs or performs cordon-and-evict consolidation passes.
+- `podgc`: dry-runs or deletes completed (Succeeded/Failed) pods left by Jobs.
 - `ui`: shows trends, engine status, halt controls, readiness, and remediation
   activity from DynamoDB.
 - `persistence`: stores reports, recommendation rollups, engine status, and
@@ -256,8 +257,8 @@ The applier refuses to mutate when any of the following apply:
 
 ### Halt switch
 
-Stop both the applier and the nudger from making any further changes without
-redeploying:
+Stop the applier, the nudger, and the completed-pod GC from making any further
+changes without redeploying:
 
 ```bash
 kubectl -n cluster-optimizer create configmap cluster-optimizer-halt \
@@ -274,6 +275,26 @@ could be emptied next. It is dry-run by default; set
 `CLUSTER_OPTIMIZER_NUDGE_LIVE=true` to actually cordon the selected node and
 evict relocatable pods. It checks the halt switch and aborts when any candidate
 eviction is blocked by a PDB with `DisruptionsAllowed=0`.
+
+### Completed-pod cleanup
+
+Clusters that run many Jobs/CronJobs accumulate completed pods (phase
+`Succeeded` or `Failed`) that linger long after they finish. They burn no
+CPU/memory but clutter `kubectl get pods`, count against the per-node pod cap,
+and hold IP allocations. The pod GC (`--gc-completed-pods` /
+`CLUSTER_OPTIMIZER_GC_COMPLETED_PODS=true`) deletes them. It is dry-run by
+default; set `CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE=true` to actually delete,
+and it honours the shared halt switch.
+
+Flags / environment variables:
+
+| Flag | Env | Default | Purpose |
+| --- | --- | --- | --- |
+| `--gc-completed-pods` | `CLUSTER_OPTIMIZER_GC_COMPLETED_PODS` | `false` | Enable the cleanup pass (dry-run unless the live gate is set). |
+| _(live gate)_ | `CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE` | `false` | Actually delete; otherwise log only. |
+| `--gc-namespace` | `CLUSTER_OPTIMIZER_GC_NAMESPACE` | _(all)_ | Restrict to one namespace. |
+| `--gc-min-age` | `CLUSTER_OPTIMIZER_GC_MIN_AGE` | `0` | Only delete pods that finished at least this long ago (e.g. `1h`). |
+| `--gc-max-deletions` | `CLUSTER_OPTIMIZER_GC_MAX_DELETIONS` | `0` | Cap deletions per run, oldest first (`0` = no cap). |
 
 ### Recovery and operator runbook
 
