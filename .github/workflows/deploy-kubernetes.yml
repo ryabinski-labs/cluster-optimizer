@@ -77,8 +77,8 @@ jobs:
           doctl kubernetes cluster kubeconfig save "${DOKS_CLUSTER_ID}" --expiry-seconds 600
           kubectl cluster-info
 
-      - name: Apply read-only RBAC
-        run: kubectl apply -f manifests/rbac.yaml
+      - name: Apply engine RBAC
+        run: bash scripts/apply-rbac.sh
 
       - name: Configure optional GHCR pull secret
         env:

@@ -205,7 +205,7 @@ PERMS
 
   if [ "${failures}" -gt 0 ]; then
     echo "RBAC check: NO - ${SA_USER} is missing ${failures} permission(s) the engine needs." >&2
-    echo "       Apply the current role: kubectl apply -f manifests/rbac.yaml" >&2
+    echo "       Apply the current role: scripts/apply-rbac.sh" >&2
     exit 1
   fi
   echo "RBAC check: YES - ${SA_USER} has the pod permissions the engine needs."
