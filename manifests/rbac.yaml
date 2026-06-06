@@ -12,7 +12,11 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: cluster-optimizer-readonly
+  # Renamed from cluster-optimizer-readonly: the role is no longer read-only
+  # (it grants update nodes, create pods/eviction, delete pods, and patch
+  # workloads for the opt-in remediation paths). scripts/apply-rbac.sh removes
+  # the old objects so a renamed apply does not orphan them.
+  name: cluster-optimizer-engine
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
@@ -50,11 +54,11 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: cluster-optimizer-readonly
+  name: cluster-optimizer-engine
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: cluster-optimizer-readonly
+  name: cluster-optimizer-engine
 subjects:
   - kind: ServiceAccount
     name: cluster-optimizer

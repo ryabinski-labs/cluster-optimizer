@@ -211,7 +211,7 @@ docker push ghcr.io/ryabinski-labs/cluster-optimizer:0.1.0
 Run in-cluster without persistence:
 
 ```bash
-kubectl apply -f manifests/rbac.yaml
+scripts/apply-rbac.sh
 kubectl apply -f manifests/cronjob.yaml
 ```
 
@@ -345,7 +345,7 @@ aws iam create-access-key --user-name cluster-optimizer-doks
 Create the Kubernetes namespace, ServiceAccount, and base RBAC:
 
 ```bash
-kubectl apply -f manifests/rbac.yaml
+scripts/apply-rbac.sh
 ```
 
 Create the Kubernetes Secret from the access key values returned by AWS:
