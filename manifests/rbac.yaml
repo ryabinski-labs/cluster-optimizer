@@ -19,7 +19,9 @@ rules:
     verbs: ["get", "list", "watch", "update"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    # "delete" is required only for the opt-in completed-pod GC
+    # (--gc-completed-pods); it stays dry-run unless the live gate is set.
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["pods/eviction"]
     verbs: ["create"]

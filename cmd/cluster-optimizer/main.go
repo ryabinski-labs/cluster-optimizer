@@ -15,6 +15,7 @@ import (
 	"github.com/GipsyChef/cluster-optimizer/internal/collector"
 	"github.com/GipsyChef/cluster-optimizer/internal/nudger"
 	"github.com/GipsyChef/cluster-optimizer/internal/plan"
+	"github.com/GipsyChef/cluster-optimizer/internal/podgc"
 	"github.com/GipsyChef/cluster-optimizer/internal/store"
 )
 
@@ -32,6 +33,10 @@ func run(ctx context.Context, args []string) error {
 	var nudge bool
 	var autoApply bool
 	var targetsPath string
+	var gcCompletedPods bool
+	var gcNamespace string
+	var gcMinAge time.Duration
+	var gcMaxDeletions int
 	flags := flag.NewFlagSet("cluster-optimizer", flag.ContinueOnError)
 	flags.StringVar(&clusterID, "cluster-id", envOr("CLUSTER_OPTIMIZER_CLUSTER_ID", "default"), "stable cluster identifier")
 	flags.StringVar(&output, "output", envOr("OUTPUT_FORMAT", "json"), "json or text")
@@ -39,6 +44,10 @@ func run(ctx context.Context, args []string) error {
 	flags.BoolVar(&nudge, "nudge", envBoolOr("CLUSTER_OPTIMIZER_NUDGE", false), "actively nudge pods to run on fewer nodes (dry-run unless CLUSTER_OPTIMIZER_NUDGE_LIVE=true)")
 	flags.BoolVar(&autoApply, "auto-apply", envBoolOr("CLUSTER_OPTIMIZER_AUTOAPPLY_FLAG", false), "request live in-cluster auto-apply (requires CLUSTER_OPTIMIZER_AUTOAPPLY=true env to actually mutate)")
 	flags.StringVar(&targetsPath, "targets", envOr("CLUSTER_OPTIMIZER_TARGETS", "/etc/cluster-optimizer/remediation-targets.json"), "path to remediation-targets.json")
+	flags.BoolVar(&gcCompletedPods, "gc-completed-pods", envBoolOr("CLUSTER_OPTIMIZER_GC_COMPLETED_PODS", false), "clean up completed (Succeeded/Failed) pods (dry-run unless CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE=true)")
+	flags.StringVar(&gcNamespace, "gc-namespace", envOr("CLUSTER_OPTIMIZER_GC_NAMESPACE", ""), "limit completed-pod cleanup to one namespace (default: all namespaces)")
+	flags.DurationVar(&gcMinAge, "gc-min-age", envDurationOr("CLUSTER_OPTIMIZER_GC_MIN_AGE", 0), "only delete completed pods that finished at least this long ago (e.g. 1h)")
+	flags.IntVar(&gcMaxDeletions, "gc-max-deletions", envIntOr("CLUSTER_OPTIMIZER_GC_MAX_DELETIONS", 0), "cap completed-pod deletions per run, oldest first (0 = no cap)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -101,12 +110,15 @@ func run(ctx context.Context, args []string) error {
 	p := plan.Build(report, snapshot, cls, policy, occurrences)
 	autoApplyEnv := envBoolOr("CLUSTER_OPTIMIZER_AUTOAPPLY", false)
 	nudgeLive := envBoolOr("CLUSTER_OPTIMIZER_NUDGE_LIVE", false)
+	gcLive := envBoolOr("CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE", false)
 
 	status := store.EngineStatus{
 		AutoApplyEnabled: autoApply,
 		AutoApplyLive:    autoApply && autoApplyEnv,
 		NudgeEnabled:     nudge,
 		NudgeLive:        nudge && nudgeLive,
+		GCEnabled:        gcCompletedPods,
+		GCLive:           gcCompletedPods && gcLive,
 		LastRunAt:        time.Now().UTC(),
 		LastClusterID:    clusterID,
 	}
@@ -151,6 +163,36 @@ func run(ctx context.Context, args []string) error {
 			status.HaltReason = nudgeResult.HaltReason
 		}
 		if event, ok := nudgerEvent(nudgeResult, status.LastRunAt); ok {
+			events = append(events, event)
+			status.LastRunActions++
+			if event.Applied {
+				status.LastRunApplied++
+			}
+			if event.Error != "" {
+				status.LastRunErrors++
+			}
+		}
+	}
+
+	if gcCompletedPods {
+		clientset, err := collector.GetClientset()
+		if err != nil {
+			return fmt.Errorf("failed to get kubernetes clientset for completed-pod cleanup: %w", err)
+		}
+		gcOpts := podgc.NewOptions()
+		gcOpts.Live = gcLive
+		gcOpts.Namespace = gcNamespace
+		gcOpts.MinAge = gcMinAge
+		gcOpts.MaxDeletions = gcMaxDeletions
+		gcResult, err := podgc.CleanCompletedPodsWithResult(ctx, clientset, gcOpts)
+		if err != nil {
+			return fmt.Errorf("completed-pod cleanup failed: %w", err)
+		}
+		status.HaltActive = status.HaltActive || gcResult.Halted
+		if gcResult.HaltReason != "" {
+			status.HaltReason = gcResult.HaltReason
+		}
+		if event, ok := podGCEvent(gcResult, status.LastRunAt); ok {
 			events = append(events, event)
 			status.LastRunActions++
 			if event.Applied {
@@ -268,6 +310,30 @@ func nudgerEvent(result nudger.Result, ts time.Time) (store.RemediationEvent, bo
 	return event, true
 }
 
+// podGCEvent collapses one completed-pod cleanup pass into a single audit row.
+// ok=false covers the "engine ran but found nothing and wasn't halted" case so
+// we don't flood the feed with empty rows on every CronJob tick.
+func podGCEvent(result podgc.Result, ts time.Time) (store.RemediationEvent, bool) {
+	if result.Candidates == 0 && !result.Halted {
+		return store.RemediationEvent{}, false
+	}
+	reason := result.HaltReason
+	if reason == "" && result.Mode == "dry-run" && result.Candidates > 0 {
+		reason = fmt.Sprintf("%d completed pod(s) eligible for cleanup", result.Candidates)
+	}
+	return store.RemediationEvent{
+		Timestamp:      ts,
+		Mode:           result.Mode,
+		Kind:           "delete_completed_pod",
+		Namespace:      result.Namespace,
+		Deleted:        result.Deleted,
+		DeletionErrors: result.DeletionErrors,
+		HaltActive:     result.Halted,
+		Reason:         reason,
+		Applied:        result.Mode == "live" && result.Deleted > 0 && result.DeletionErrors == 0,
+	}, true
+}
+
 func envOr(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -281,6 +347,30 @@ func envBoolOr(key string, fallback bool) bool {
 		return fallback
 	}
 	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func envIntOr(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func envDurationOr(key string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
 	if err != nil {
 		return fallback
 	}

@@ -41,8 +41,9 @@ type ExistingRecommendation struct {
 // what the applier or nudger did (or would have done in dry-run) so the UI
 // can show operators that the engine is alive and what it touched.
 //
-// Mode is "live" or "dry-run". Kind is "patch_request" (applier) or
-// "cordon_evict" (nudger). Applied is true only when a live mutation
+// Mode is "live" or "dry-run". Kind is "patch_request" (applier),
+// "cordon_evict" (nudger), or "delete_completed_pod" (pod GC). Applied is
+// true only when a live mutation
 // completed successfully; Error carries the message when it failed. For
 // nudger events Container is empty, BeforeCPUm/AfterCPUm/BeforeMemMiB/
 // AfterMemMiB are zero, and TargetNode/Evicted/EvictionErrors describe the
@@ -67,6 +68,8 @@ type RemediationEvent struct {
 	TargetNode      string    `json:"target_node,omitempty"`
 	Evicted         int       `json:"evicted,omitempty"`
 	EvictionErrors  int       `json:"eviction_errors,omitempty"`
+	Deleted         int       `json:"deleted,omitempty"`
+	DeletionErrors  int       `json:"deletion_errors,omitempty"`
 	OccurrenceCount int64     `json:"occurrence_count,omitempty"`
 }
 
@@ -79,6 +82,8 @@ type EngineStatus struct {
 	AutoApplyLive    bool      `json:"auto_apply_live"`
 	NudgeEnabled     bool      `json:"nudge_enabled"`
 	NudgeLive        bool      `json:"nudge_live"`
+	GCEnabled        bool      `json:"gc_enabled"`
+	GCLive           bool      `json:"gc_live"`
 	HaltActive       bool      `json:"halt_active"`
 	HaltReason       string    `json:"halt_reason,omitempty"`
 	LastRunAt        time.Time `json:"last_run_at"`

@@ -40,6 +40,13 @@ Environment overrides:
                  Default: remediation-targets.json
   VERIFY_TARGETS_CONFIG
                  Verify TARGETS_FILE matches the live ConfigMap. Default: auto
+  SERVICE_ACCOUNT
+                 ServiceAccount the CronJob runs as, checked by the RBAC
+                 verification. Default: cluster-optimizer
+  VERIFY_RBAC    Verify the ServiceAccount has the pod permissions the engine
+                 needs (incl. delete pods for completed-pod GC). One of
+                 true|false|auto. auto skips when impersonation is
+                 unavailable. Default: auto
 
 Examples:
   scripts/verify-deployment.sh
@@ -134,6 +141,76 @@ verify_targets_config_sync() {
   echo "Targets config sync: YES - the live ConfigMap matches ${TARGETS_FILE}."
 }
 
+# rbac_can_i echoes "yes", "no", or "error" for a SubjectAccessReview run as
+# the engine's ServiceAccount. "error" means the review could not be evaluated
+# (typically the caller cannot impersonate), which is distinct from a denied
+# "no". Extra args (e.g. --subresource=eviction) are passed through.
+rbac_can_i() {
+  local verb="$1"
+  local resource="$2"
+  shift 2
+  local out
+  if out="$(kubectl auth can-i "${verb}" "${resource}" "$@" \
+    --as="${SA_USER}" -n "${NAMESPACE}" 2>/dev/null)"; then
+    printf 'yes\n'
+  elif [ "${out}" = "no" ]; then
+    printf 'no\n'
+  else
+    printf 'error\n'
+  fi
+}
+
+# verify_rbac_permissions confirms the deployed ServiceAccount can perform the
+# pod verbs the engine relies on, including "delete pods" for the completed-pod
+# GC and "create pods/eviction" for the nudger. This catches RBAC drift where
+# an older manifests/rbac.yaml is live and a remediation path would silently
+# 403 at runtime. When impersonation is unavailable it skips (auto) rather than
+# failing, since not every kubeconfig can run a SubjectAccessReview as another
+# subject.
+verify_rbac_permissions() {
+  local probe
+  probe="$(rbac_can_i get pods)"
+  if [ "${probe}" = "error" ]; then
+    if [ "${VERIFY_RBAC}" = "auto" ]; then
+      echo "RBAC check: SKIPPED - cannot run SubjectAccessReview as ${SA_USER} (impersonation unavailable)."
+      return
+    fi
+    echo "RBAC check: ERROR - cannot evaluate permissions for ${SA_USER} (impersonation unavailable)." >&2
+    exit 1
+  fi
+
+  echo "RBAC subject: ${SA_USER}"
+  local failures=0
+  local label verb resource extra verdict
+  while IFS='|' read -r label verb resource extra; do
+    [ -n "${label}" ] || continue
+    if [ -n "${extra}" ]; then
+      verdict="$(rbac_can_i "${verb}" "${resource}" "${extra}")"
+    else
+      verdict="$(rbac_can_i "${verb}" "${resource}")"
+    fi
+    if [ "${verdict}" = "yes" ]; then
+      echo "  ${label}: yes"
+    else
+      echo "  ${label}: ${verdict}" >&2
+      failures=$((failures + 1))
+    fi
+  done <<'PERMS'
+get pods|get|pods|
+list pods|list|pods|
+watch pods|watch|pods|
+delete pods (completed-pod GC)|delete|pods|
+create pods/eviction (nudger)|create|pods|--subresource=eviction
+PERMS
+
+  if [ "${failures}" -gt 0 ]; then
+    echo "RBAC check: NO - ${SA_USER} is missing ${failures} permission(s) the engine needs." >&2
+    echo "       Apply the current role: kubectl apply -f manifests/rbac.yaml" >&2
+    exit 1
+  fi
+  echo "RBAC check: YES - ${SA_USER} has the pod permissions the engine needs."
+}
+
 IMAGE_TAG=""
 EXPECTING_LATEST=true
 RUN_JOB=false
@@ -185,6 +262,9 @@ TARGETS_NAMESPACE="${TARGETS_NAMESPACE:-${NAMESPACE}}"
 TARGETS_CONFIGMAP="${TARGETS_CONFIGMAP:-cluster-optimizer-targets}"
 TARGETS_KEY="${TARGETS_KEY:-remediation-targets.json}"
 VERIFY_TARGETS_CONFIG="${VERIFY_TARGETS_CONFIG:-auto}"
+SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-cluster-optimizer}"
+VERIFY_RBAC="${VERIFY_RBAC:-auto}"
+SA_USER="system:serviceaccount:${NAMESPACE}:${SERVICE_ACCOUNT}"
 
 case "${ENABLE_DYNAMODB}" in
   true|false) ;;
@@ -206,6 +286,14 @@ case "${VERIFY_TARGETS_CONFIG}" in
   true|false|auto) ;;
   *)
     echo "error: VERIFY_TARGETS_CONFIG must be 'true', 'false', or 'auto'" >&2
+    exit 2
+    ;;
+esac
+
+case "${VERIFY_RBAC}" in
+  true|false|auto) ;;
+  *)
+    echo "error: VERIFY_RBAC must be 'true', 'false', or 'auto'" >&2
     exit 2
     ;;
 esac
@@ -300,6 +388,10 @@ fi
 
 if [ "${VERIFY_TARGETS_CONFIG}" != "false" ]; then
   verify_targets_config_sync
+fi
+
+if [ "${VERIFY_RBAC}" != "false" ]; then
+  verify_rbac_permissions
 fi
 
 if [ "${RUN_JOB}" != "true" ]; then

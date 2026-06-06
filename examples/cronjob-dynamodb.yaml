@@ -26,7 +26,7 @@ spec:
             - name: optimizer
               image: ghcr.io/ryabinski-labs/cluster-optimizer:latest
               imagePullPolicy: IfNotPresent
-              args: ["--output", "json", "--auto-apply", "--nudge"]
+              args: ["--output", "json", "--auto-apply", "--nudge", "--gc-completed-pods"]
               env:
                 - name: CLUSTER_OPTIMIZER_CLUSTER_ID
                   value: "default"
@@ -51,6 +51,13 @@ spec:
                   value: "true"
                 - name: CLUSTER_OPTIMIZER_NUDGE_LIVE
                   value: "true"
+                # Completed-pod cleanup runs (dry-run: logs what it would
+                # delete) because --gc-completed-pods is in args above. Pod
+                # deletion is harder to reverse than a request trim or cordon,
+                # so the live gate is left off here. Uncomment to actually
+                # delete completed pods.
+                # - name: CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE
+                #   value: "true"
               volumeMounts:
                 - name: targets
                   mountPath: /etc/cluster-optimizer
