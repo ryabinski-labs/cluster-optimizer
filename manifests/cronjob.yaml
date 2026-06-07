@@ -45,8 +45,10 @@ spec:
                 # nudger logs a dry-run plan unless this is true.
                 # - name: CLUSTER_OPTIMIZER_NUDGE_LIVE
                 #   value: "true"
-                # Completed-pod cleanup. ADD "--gc-completed-pods" to args to
-                # enable (dry-run), then set the gate below to actually delete.
+                # Completed-pod cleanup. Off by default. ADD "--gc-completed-pods"
+                # to args to enable (dry-run), then UNCOMMENT the gate below to
+                # actually delete. Optionally scope with "--gc-namespace=<ns>" and
+                # bound blast radius with "--gc-min-age=1h" / "--gc-max-deletions=N".
                 # - name: CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE
                 #   value: "true"
               # volumeMounts:
