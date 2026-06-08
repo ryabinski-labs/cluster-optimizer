@@ -1,0 +1,25 @@
+# Local test environment for cluster-optimizer.
+#
+# Currently provides DynamoDB Local so the engine's persistence path
+# (PutReport / PutRemediations / PutEngineStatus) can be exercised
+# end-to-end without touching real AWS.
+#
+#   docker compose up -d            # start DynamoDB Local on :8001
+#   ./scripts/create-local-table.sh # create the single-table schema
+#   docker compose down             # stop and remove
+#
+# Point the engine at it with:
+#   AWS_ENDPOINT_URL_DYNAMODB=http://localhost:8001 \
+#   AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local \
+#   DYNAMODB_TABLE=cluster-optimizer-reports \
+#   go run ./cmd/cluster-optimizer ...
+#
+# The AWS SDK for Go v2 (config >= v1.27) honors AWS_ENDPOINT_URL_DYNAMODB
+# natively, so no application code change is needed.
+services:
+  dynamodb-local:
+    image: docker.io/amazon/dynamodb-local:latest
+    container_name: cluster-optimizer-dynamodb-local
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    ports:
+      - "8001:8000"
