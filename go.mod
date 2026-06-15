@@ -3,7 +3,7 @@ module github.com/GipsyChef/cluster-optimizer
 go 1.25.0
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.41.12
+	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.23
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.58.0
 	gopkg.in/yaml.v3 v3.0.1
