@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -108,14 +109,82 @@ func collectNodes(ctx context.Context, clientset *kubernetes.Clientset) ([]model
 		if instanceType == "" {
 			instanceType = node.Labels["beta.kubernetes.io/instance-type"]
 		}
-		result = append(result, model.Node{
+		m := model.Node{
 			Name:                 node.Name,
 			InstanceType:         instanceType,
 			AllocatableCPUm:      cpu,
 			AllocatableMemoryMiB: mem,
-		})
+			DiskPressure:         hasDiskPressure(node),
+		}
+		// Disk usage comes from the kubelet stats/summary endpoint, proxied
+		// through the API server. It is best-effort: a node whose kubelet is
+		// unreachable (or whose RBAC lacks nodes/proxy) keeps zeroed disk
+		// fields and is skipped by the disk rule rather than failing the run.
+		if cap, used, imageFs, err := nodeFsStats(ctx, clientset, node.Name); err == nil {
+			m.DiskCapacityBytes = cap
+			m.DiskUsedBytes = used
+			m.ImageFsUsedBytes = imageFs
+		}
+		result = append(result, m)
 	}
 	return result, nil
+}
+
+func hasDiskPressure(node corev1.Node) bool {
+	for _, c := range node.Status.Conditions {
+		if c.Type == corev1.NodeDiskPressure {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// nodeFsStats fetches the kubelet stats/summary for one node via the API
+// server proxy and extracts root-filesystem capacity/used and image-filesystem
+// used bytes. Returns an error the caller treats as "stats unavailable".
+func nodeFsStats(ctx context.Context, clientset kubernetes.Interface, nodeName string) (capacity, used, imageFs int64, err error) {
+	raw, err := clientset.CoreV1().RESTClient().Get().
+		Resource("nodes").
+		Name(nodeName).
+		SubResource("proxy").
+		Suffix("stats", "summary").
+		DoRaw(ctx)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return parseNodeFsStats(raw)
+}
+
+// parseNodeFsStats pulls the disk numbers out of a kubelet stats/summary
+// payload. Split out from the network call so it can be unit-tested against a
+// recorded payload.
+func parseNodeFsStats(raw []byte) (capacity, used, imageFs int64, err error) {
+	var summary struct {
+		Node struct {
+			Fs struct {
+				CapacityBytes *int64 `json:"capacityBytes"`
+				UsedBytes     *int64 `json:"usedBytes"`
+			} `json:"fs"`
+			Runtime struct {
+				ImageFs struct {
+					UsedBytes *int64 `json:"usedBytes"`
+				} `json:"imageFs"`
+			} `json:"runtime"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		return 0, 0, 0, err
+	}
+	deref := func(p *int64) int64 {
+		if p == nil {
+			return 0
+		}
+		return *p
+	}
+	return deref(summary.Node.Fs.CapacityBytes),
+		deref(summary.Node.Fs.UsedBytes),
+		deref(summary.Node.Runtime.ImageFs.UsedBytes),
+		nil
 }
 
 func collectPods(ctx context.Context, clientset *kubernetes.Clientset, usage map[string]resourceUsage) ([]model.Pod, error) {

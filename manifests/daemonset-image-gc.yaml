@@ -1,0 +1,127 @@
+# Node image garbage collector (opt-in).
+#
+# Runs one pod per node that prunes container images no container references,
+# keeping node disk below the cloud provider's alert line without waiting for
+# the kubelet's own image GC (which only triggers at 85% and is not tunable on
+# managed control planes such as DOKS).
+#
+# SAFETY: dry-run by default. It logs what it WOULD remove until you set
+# CLUSTER_OPTIMIZER_NODE_GC_LIVE=true below. It honours the shared halt
+# ConfigMap (cluster-optimizer/cluster-optimizer-halt, key "halt") and only
+# removes images not referenced by any container on the node.
+#
+# Prerequisite: the cluster-optimizer namespace and the halt ServiceAccount
+# wiring from rbac.yaml. Apply this file after manifests/rbac.yaml.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-optimizer-node-gc
+  namespace: cluster-optimizer
+---
+# The DaemonSet only needs to read the shared halt switch; a namespaced Role is
+# sufficient (no cluster-wide permissions, no node API access — disk usage is
+# measured locally via statfs on a read-only host mount).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cluster-optimizer-node-gc
+  namespace: cluster-optimizer
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cluster-optimizer-node-gc
+  namespace: cluster-optimizer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cluster-optimizer-node-gc
+subjects:
+  - kind: ServiceAccount
+    name: cluster-optimizer-node-gc
+    namespace: cluster-optimizer
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cluster-optimizer-node-gc
+  namespace: cluster-optimizer
+  labels:
+    app.kubernetes.io/name: cluster-optimizer-node-gc
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cluster-optimizer-node-gc
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cluster-optimizer-node-gc
+    spec:
+      serviceAccountName: cluster-optimizer-node-gc
+      # Run on every node, including control-plane/tainted nodes if present.
+      tolerations:
+        - operator: Exists
+      priorityClassName: system-node-critical
+      containers:
+        - name: node-image-gc
+          image: ghcr.io/ryabinski-labs/cluster-optimizer:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/node-image-gc"]
+          args: ["--interval=30m"]
+          env:
+            # Threshold (percent root-disk full) below which a run is a no-op.
+            # Default 65 — below DigitalOcean's 70% alert, below kubelet's 85%.
+            - name: CLUSTER_OPTIMIZER_NODE_GC_DISK_THRESHOLD
+              value: "65"
+            # Blast-radius cap: max images removed per run (largest first).
+            # Leave unset/0 for no cap.
+            # - name: CLUSTER_OPTIMIZER_NODE_GC_MAX_REMOVALS
+            #   value: "20"
+            # LIVE GATE — off by default (dry-run logs only). Uncomment to
+            # actually remove images. Confirm the dry-run logs first.
+            # - name: CLUSTER_OPTIMIZER_NODE_GC_LIVE
+            #   value: "true"
+          resources:
+            requests:
+              cpu: 5m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            # The containerd socket and image store are root-owned; the GC must
+            # run as root to talk to the CRI and remove images. It is NOT
+            # privileged and drops all capabilities — it only needs the mounted
+            # socket plus a read-only view of the host filesystem for statfs.
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: containerd-sock
+              mountPath: /run/containerd/containerd.sock
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+      volumes:
+        # CRI socket for image/container operations. Adjust if your runtime
+        # uses a different path (e.g. /run/crio/crio.sock and set
+        # CONTAINER_RUNTIME_ENDPOINT accordingly).
+        - name: containerd-sock
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket
+        # Read-only host root, used only to measure disk fullness (statfs).
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory

@@ -7,6 +7,31 @@ type Node struct {
 	InstanceType         string `json:"instance_type,omitempty"`
 	AllocatableCPUm      int64  `json:"allocatable_cpu_m"`
 	AllocatableMemoryMiB int64  `json:"allocatable_memory_mib"`
+	// DiskCapacityBytes / DiskUsedBytes describe the node's root filesystem
+	// as reported by the kubelet stats/summary endpoint. Zero when the
+	// endpoint was unreachable (collection is best-effort: a node without
+	// disk stats is simply not evaluated by the disk rule).
+	DiskCapacityBytes int64 `json:"disk_capacity_bytes,omitempty"`
+	DiskUsedBytes     int64 `json:"disk_used_bytes,omitempty"`
+	// ImageFsUsedBytes is the space the container runtime's image filesystem
+	// occupies on that node — the bytes a node image GC can reclaim by
+	// pruning images no running container references. On DOKS the image
+	// filesystem shares the root disk, so this is usually the dominant slice
+	// of DiskUsedBytes.
+	ImageFsUsedBytes int64 `json:"image_fs_used_bytes,omitempty"`
+	// DiskPressure mirrors the node's DiskPressure status condition: true
+	// once the kubelet has started evicting pods / refusing to admit new
+	// ones because the disk is critically full.
+	DiskPressure bool `json:"disk_pressure,omitempty"`
+}
+
+// DiskUsedPercent returns root-filesystem utilization as a percentage, or 0
+// when capacity is unknown (kubelet stats were unavailable).
+func (n Node) DiskUsedPercent() float64 {
+	if n.DiskCapacityBytes <= 0 {
+		return 0
+	}
+	return 100 * float64(n.DiskUsedBytes) / float64(n.DiskCapacityBytes)
 }
 
 type Pod struct {
