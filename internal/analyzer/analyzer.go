@@ -59,6 +59,7 @@ func AnalyzeWith(snapshot model.Snapshot, c *classifier.Classifier) Report {
 	findings = append(findings, analyzeScaling(snapshot.Workloads, snapshot.HPAs)...)
 	findings = append(findings, analyzeRuntimeModernization(snapshot.Workloads)...)
 	findings = append(findings, analyzeDaemonSetOverhead(snapshot)...)
+	findings = append(findings, analyzeNodeDisk(snapshot.Nodes)...)
 	findings = append(findings, analyzeClusterHygiene(snapshot.Pods)...)
 	if c != nil {
 		for i := range findings {
@@ -385,6 +386,61 @@ func analyzeRuntimeModernization(workloads []model.Workload) []Finding {
 			"High: rewrites are product work; require profiling, load testing, canary rollout, and rollback to the existing implementation.", "low"))
 	}
 	return findings
+}
+
+// Disk-utilization thresholds (percent of the node root filesystem). The
+// warn line matches DigitalOcean's default droplet disk alert (70%), which
+// fires well before the kubelet's own image garbage collection kicks in
+// (imageGCHighThresholdPercent defaults to 85%), so a managed-cluster node can
+// sit "alerting" indefinitely without ever self-cleaning. The critical line
+// matches that kubelet GC trigger.
+const (
+	nodeDiskWarnPercent     = 70.0
+	nodeDiskCriticalPercent = 85.0
+)
+
+// analyzeNodeDisk flags nodes whose root filesystem is filling up. The dominant
+// reclaimable slice on a Kubernetes node is almost always the image filesystem
+// (stale image versions from repeated deploys), which the node image GC
+// DaemonSet (cmd/node-image-gc) can prune on a lower, configurable threshold
+// than the kubelet's built-in 85%.
+func analyzeNodeDisk(nodes []model.Node) []Finding {
+	var findings []Finding
+	for _, node := range nodes {
+		// No kubelet stats (proxy unreachable / RBAC missing): nothing to say.
+		if node.DiskCapacityBytes <= 0 {
+			continue
+		}
+		pct := node.DiskUsedPercent()
+		if pct < nodeDiskWarnPercent && !node.DiskPressure {
+			continue
+		}
+		severity := "medium"
+		if node.DiskPressure || pct >= nodeDiskCriticalPercent {
+			severity = "high"
+		}
+		evidence := fmt.Sprintf("Node %s root disk is %.0f%% full (%s of %s); image cache uses %s.",
+			node.Name, pct, formatGB(node.DiskUsedBytes), formatGB(node.DiskCapacityBytes), formatGB(node.ImageFsUsedBytes))
+		if node.DiskPressure {
+			evidence += " Node is reporting DiskPressure (kubelet is evicting pods)."
+		}
+		findings = append(findings, Finding{
+			RuleID:             "node-disk-utilization-high",
+			Severity:           severity,
+			Workload:           "Node/" + node.Name,
+			Evidence:           evidence,
+			Recommendation:     "Prune unreferenced container images on the node (deploy manifests/daemonset-image-gc.yaml / cmd/node-image-gc) so the image cache stops accumulating stale deploy versions; the kubelet only image-GCs at 85%. If disk stays high after pruning, raise the node size or reduce on-node data.",
+			ExpectedCostEffect: "Frees disk without a larger node; avoids DiskPressure evictions and image re-pull stalls.",
+			Risk:               "Low: pruning only removes images no running container references; they are re-pulled on next use.",
+			Confidence:         "high",
+			Pillars:            pillars(),
+		})
+	}
+	return findings
+}
+
+func formatGB(bytes int64) string {
+	return fmt.Sprintf("%.1f GB", float64(bytes)/(1024*1024*1024))
 }
 
 func analyzeDaemonSetOverhead(snapshot model.Snapshot) []Finding {

@@ -408,3 +408,70 @@ func TestDetectsFixedReplicaWithoutAutoscaler(t *testing.T) {
 		t.Fatalf("expected scaling and pdb findings, got: %#v", report.Findings)
 	}
 }
+
+func diskFinding(findings []Finding) *Finding {
+	for i := range findings {
+		if findings[i].RuleID == "node-disk-utilization-high" {
+			return &findings[i]
+		}
+	}
+	return nil
+}
+
+func TestNodeDiskBelowThresholdIsQuiet(t *testing.T) {
+	snapshot := model.Snapshot{Nodes: []model.Node{
+		{Name: "n1", DiskCapacityBytes: 100, DiskUsedBytes: 50, ImageFsUsedBytes: 30},
+	}}
+	if f := diskFinding(Analyze(snapshot).Findings); f != nil {
+		t.Fatalf("did not expect a disk finding at 50%%, got %#v", f)
+	}
+}
+
+func TestNodeDiskWarnAtSeventyPercent(t *testing.T) {
+	snapshot := model.Snapshot{Nodes: []model.Node{
+		{Name: "n1", DiskCapacityBytes: 100, DiskUsedBytes: 71, ImageFsUsedBytes: 40},
+	}}
+	f := diskFinding(Analyze(snapshot).Findings)
+	if f == nil {
+		t.Fatal("expected a disk finding at 71%")
+	}
+	if f.Severity != "medium" {
+		t.Errorf("severity = %q, want medium", f.Severity)
+	}
+	if f.Workload != "Node/n1" {
+		t.Errorf("workload = %q, want Node/n1", f.Workload)
+	}
+}
+
+func TestNodeDiskCriticalAtEightyFivePercent(t *testing.T) {
+	snapshot := model.Snapshot{Nodes: []model.Node{
+		{Name: "n1", DiskCapacityBytes: 100, DiskUsedBytes: 90, ImageFsUsedBytes: 60},
+	}}
+	f := diskFinding(Analyze(snapshot).Findings)
+	if f == nil || f.Severity != "high" {
+		t.Fatalf("expected high-severity disk finding at 90%%, got %#v", f)
+	}
+}
+
+func TestNodeDiskPressureIsCriticalEvenBelowThreshold(t *testing.T) {
+	// A node under DiskPressure must be flagged high even if the reported
+	// percentage is momentarily below the warn line.
+	snapshot := model.Snapshot{Nodes: []model.Node{
+		{Name: "n1", DiskCapacityBytes: 100, DiskUsedBytes: 60, DiskPressure: true},
+	}}
+	f := diskFinding(Analyze(snapshot).Findings)
+	if f == nil || f.Severity != "high" {
+		t.Fatalf("expected high-severity finding under DiskPressure, got %#v", f)
+	}
+	if !strings.Contains(f.Evidence, "DiskPressure") {
+		t.Errorf("evidence should mention DiskPressure: %q", f.Evidence)
+	}
+}
+
+func TestNodeDiskNoStatsIsSkipped(t *testing.T) {
+	// Capacity 0 means the kubelet stats proxy was unreachable; skip silently.
+	snapshot := model.Snapshot{Nodes: []model.Node{{Name: "n1"}}}
+	if f := diskFinding(Analyze(snapshot).Findings); f != nil {
+		t.Fatalf("expected no finding without disk stats, got %#v", f)
+	}
+}

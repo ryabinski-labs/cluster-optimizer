@@ -173,6 +173,8 @@ The application is intentionally small:
   enabled.
 - `nudger`: dry-runs or performs cordon-and-evict consolidation passes.
 - `podgc`: dry-runs or deletes completed (Succeeded/Failed) pods left by Jobs.
+- `imagegc` (+ `cmd/node-image-gc`): dry-runs or prunes unreferenced container
+  images on each node (opt-in DaemonSet) to keep node disk below the alert line.
 - `ui`: shows trends, engine status, halt controls, readiness, and remediation
   activity from DynamoDB.
 - `persistence`: stores reports, recommendation rollups, engine status, and
@@ -295,6 +297,47 @@ Flags / environment variables:
 | `--gc-namespace` | `CLUSTER_OPTIMIZER_GC_NAMESPACE` | _(all)_ | Restrict to one namespace. |
 | `--gc-min-age` | `CLUSTER_OPTIMIZER_GC_MIN_AGE` | `0` | Only delete pods that finished at least this long ago (e.g. `1h`). |
 | `--gc-max-deletions` | `CLUSTER_OPTIMIZER_GC_MAX_DELETIONS` | `0` | Cap deletions per run, oldest first (`0` = no cap). |
+
+### Node disk & image cleanup
+
+Repeated deploys leave a node's container-image cache full of stale image
+versions. The kubelet does garbage-collect images, but only once the image
+filesystem crosses 85% (`imageGCHighThresholdPercent`), and that threshold is
+not tunable on managed control planes like DOKS. Meanwhile the cloud provider's
+default disk alert fires much earlier (DigitalOcean warns at 70%), so a node can
+sit "disk high" indefinitely without ever self-cleaning.
+
+Two pieces address this:
+
+- **Detection (read-only, always on).** The collector reads each node's kubelet
+  `stats/summary` and `DiskPressure` condition. The `node-disk-utilization-high`
+  finding flags nodes at or above 70% (medium) — or 85%/`DiskPressure` (high) —
+  and reports how much of the disk is image cache. This needs the read-only
+  `nodes/proxy` grant in `manifests/rbac.yaml`; nodes whose kubelet stats are
+  unreachable are simply skipped.
+- **Active cleanup (opt-in DaemonSet).** `cmd/node-image-gc` runs one pod per
+  node (`manifests/daemonset-image-gc.yaml`), talks to the node's containerd
+  socket over the CRI API, and removes images no container references. It is
+  **dry-run by default** — it logs what it would remove until you set
+  `CLUSTER_OPTIMIZER_NODE_GC_LIVE=true` — only prunes above a configurable disk
+  threshold, honours the shared halt switch, and never touches an in-use image.
+
+```bash
+kubectl apply -f manifests/rbac.yaml                 # adds nodes/proxy (detection)
+kubectl apply -f manifests/daemonset-image-gc.yaml   # dry-run pruner, one pod/node
+kubectl -n cluster-optimizer logs -l app.kubernetes.io/name=cluster-optimizer-node-gc
+# review the "would remove ..." lines, then set CLUSTER_OPTIMIZER_NODE_GC_LIVE=true
+```
+
+Flags / environment variables (`node-image-gc`):
+
+| Flag | Env | Default | Purpose |
+| --- | --- | --- | --- |
+| _(live gate)_ | `CLUSTER_OPTIMIZER_NODE_GC_LIVE` | `false` | Actually remove images; otherwise log only. |
+| `--disk-threshold` | `CLUSTER_OPTIMIZER_NODE_GC_DISK_THRESHOLD` | `65` | Only prune when root disk is at least this % full (`0` = always). |
+| `--max-removals` | `CLUSTER_OPTIMIZER_NODE_GC_MAX_REMOVALS` | `0` | Cap removals per run, largest first (`0` = no cap). |
+| `--interval` | `CLUSTER_OPTIMIZER_NODE_GC_INTERVAL` | `0` | Repeat on this interval (`0` = run once); the DaemonSet sets `30m`. |
+| `--cri-endpoint` | `CONTAINER_RUNTIME_ENDPOINT` | `/run/containerd/containerd.sock` | CRI socket (set for non-containerd runtimes). |
 
 ### Recovery and operator runbook
 
