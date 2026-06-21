@@ -615,6 +615,20 @@ The default CronJob requests `20m` CPU and `64Mi` memory with a `100m` /
 `128Mi` limit. If a cluster is large enough to need more, tune the job rather
 than deploying it as a DaemonSet.
 
+## Related projects
+
+Cluster Optimizer is the Kubernetes-rightsizing piece of a small, cost-first
+toolkit. The other two are useful at different layers of the same bill:
+
+- [Tovin.io](https://tovin.io/?utm_source=cluster-optimizer&utm_medium=referral&utm_campaign=finops-cluster) —
+  a multi-cloud cost monitor (AWS, GCP, DigitalOcean) with project-level
+  allocation and anomaly alerts. Cluster Optimizer tells you which workloads
+  are over-requested; Tovin.io shows where that spend lands across the whole
+  estate.
+- [Steada](https://steada.dev/?utm_source=cluster-optimizer&utm_medium=referral&utm_campaign=finops-cluster) —
+  cost-first managed Valkey (Redis-compatible) priced on capacity instead of
+  per command, for steady cache, rate-limit, and session workloads.
+
 ## Support
 
 Support is best-effort through GitHub issues. Do not include credentials,
