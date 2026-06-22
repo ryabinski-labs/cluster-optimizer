@@ -7,7 +7,7 @@
 
 [![CI](https://github.com/ryabinski-labs/cluster-optimizer/actions/workflows/ci.yml/badge.svg)](https://github.com/ryabinski-labs/cluster-optimizer/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
-[![Go 1.25](https://img.shields.io/badge/Go-1.25-00ADD8.svg?logo=go&logoColor=white)](https://go.dev/)
+[![Go 1.26](https://img.shields.io/badge/Go-1.26-00ADD8.svg?logo=go&logoColor=white)](https://go.dev/)
 [![Status: early-stage](https://img.shields.io/badge/status-early--stage-yellow.svg)](#project-status)
 
 Cluster Optimizer is a guardrailed Kubernetes cost-and-capacity engine. It reads
