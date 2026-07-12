@@ -2,7 +2,7 @@
 // the live-mutation entry point and the most safety-sensitive code in this
 // project; read this header before changing anything.
 //
-// SAFETY MODEL
+// # SAFETY MODEL
 //
 // The applier refuses to mutate the cluster unless ALL of these are true:
 //

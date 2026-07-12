@@ -121,7 +121,7 @@ func TestBuildSkipsBelowMinConfidence(t *testing.T) {
 	snapshot := buildSnapshot(50)
 	c := buildClassifier("memory-request-over-provisioned")
 	findings := []analyzer.Finding{{
-		RuleID: "memory-request-over-provisioned",
+		RuleID:    "memory-request-over-provisioned",
 		Namespace: "default", Workload: "Deployment/api",
 		Confidence: "low",
 	}}
@@ -136,7 +136,7 @@ func TestBuildSkipsBelowMinOccurrences(t *testing.T) {
 	snapshot := buildSnapshot(50)
 	c := buildClassifier("memory-request-over-provisioned")
 	findings := []analyzer.Finding{{
-		RuleID: "memory-request-over-provisioned",
+		RuleID:    "memory-request-over-provisioned",
 		Namespace: "default", Workload: "Deployment/api",
 		Confidence: "high",
 	}}
@@ -152,7 +152,7 @@ func TestBuildRefusesWithoutPersistenceWhenRequired(t *testing.T) {
 	snapshot := buildSnapshot(50)
 	c := buildClassifier("memory-request-over-provisioned")
 	findings := []analyzer.Finding{{
-		RuleID: "memory-request-over-provisioned",
+		RuleID:    "memory-request-over-provisioned",
 		Namespace: "default", Workload: "Deployment/api",
 		Confidence: "high",
 	}}
@@ -193,7 +193,7 @@ func TestBuildSkipsWhenNoTrimAvailable(t *testing.T) {
 	snapshot := buildSnapshot(400)
 	c := buildClassifier("memory-request-over-provisioned")
 	findings := []analyzer.Finding{{
-		RuleID: "memory-request-over-provisioned",
+		RuleID:    "memory-request-over-provisioned",
 		Namespace: "default", Workload: "Deployment/api",
 		Confidence: "high",
 	}}
