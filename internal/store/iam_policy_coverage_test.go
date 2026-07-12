@@ -197,9 +197,9 @@ func writerPolicyAllowedActions() (map[string]bool, error) {
 				Properties struct {
 					PolicyDocument struct {
 						Statement []struct {
-							Sid    string        `yaml:"Sid"`
-							Effect string        `yaml:"Effect"`
-							Action []string      `yaml:"Action"`
+							Sid    string   `yaml:"Sid"`
+							Effect string   `yaml:"Effect"`
+							Action []string `yaml:"Action"`
 						} `yaml:"Statement"`
 					} `yaml:"PolicyDocument"`
 				} `yaml:"Properties"`

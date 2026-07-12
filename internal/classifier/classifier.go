@@ -34,9 +34,9 @@ type targetsFile struct {
 // providerManagedNamespaces are namespaces whose contents are entirely owned
 // by the DOKS control plane. We never propose live mutation in these.
 var providerManagedNamespaces = map[string]bool{
-	"kube-system":      true,
-	"kube-public":      true,
-	"kube-node-lease":  true,
+	"kube-system":       true,
+	"kube-public":       true,
+	"kube-node-lease":   true,
 	"cluster-optimizer": true, // our own namespace; out of scope for self-mutation
 }
 
@@ -47,20 +47,20 @@ var providerManagedNamespaces = map[string]bool{
 // kube-proxy is already present; GKE: gke-metrics-agent, ip-masq-agent,
 // fluentbit-gke; AKS: ama-logs, azure-cni-networkmonitor, etc.).
 var providerManagedWorkloadNames = map[string]bool{
-	"kube-proxy":                       true,
-	"cilium":                           true,
-	"cilium-operator":                  true,
-	"csi-do-node":                      true,
-	"csi-do-controller":                true,
-	"do-node-agent":                    true,
-	"doks-telemetry-config-reloader":   true,
-	"doks-telemetry-fluent-bit":        true,
-	"konnectivity-agent":               true,
-	"hubble-relay":                     true,
-	"hubble-ui":                        true,
-	"coredns":                          true,
-	"metrics-server":                   true,
-	"cpc-bridge-proxy":                 true,
+	"kube-proxy":                     true,
+	"cilium":                         true,
+	"cilium-operator":                true,
+	"csi-do-node":                    true,
+	"csi-do-controller":              true,
+	"do-node-agent":                  true,
+	"doks-telemetry-config-reloader": true,
+	"doks-telemetry-fluent-bit":      true,
+	"konnectivity-agent":             true,
+	"hubble-relay":                   true,
+	"hubble-ui":                      true,
+	"coredns":                        true,
+	"metrics-server":                 true,
+	"cpc-bridge-proxy":               true,
 }
 
 // Classifier evaluates whether a finding is provider-managed and/or
