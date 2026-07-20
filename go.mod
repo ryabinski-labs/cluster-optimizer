@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.29
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.59.2
 	golang.org/x/sys v0.47.0
-	google.golang.org/grpc v1.82.0
+	google.golang.org/grpc v1.82.1
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.35.6
 	k8s.io/apimachinery v0.35.6
