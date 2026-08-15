@@ -344,7 +344,10 @@ button.engine-pill {
   animation: spin 0.7s linear infinite;
 }
 
-.pill-help {
+/* Scoped to .engine-pill so it outranks the generic `.engine-pill small`
+   rule above, which otherwise pulls this into row 3 and stacks the help text
+   on top of the halt button. */
+.engine-pill .pill-help {
   grid-row: 4;
   grid-column: 1 / -1;
   color: var(--muted);
@@ -352,12 +355,12 @@ button.engine-pill {
   line-height: 1.35;
 }
 
-.pill-help.error {
+.engine-pill .pill-help.error {
   color: var(--red);
   font-weight: 700;
 }
 
-.pill-help:empty {
+.engine-pill .pill-help:empty {
   display: none;
 }
 
@@ -366,6 +369,16 @@ button.engine-pill {
 }
 
 .engine-pill.dry-run b {
+  color: var(--amber);
+}
+
+/* Partly live: some corrective paths act, others only report. Carried by the
+   label text first — the border is a second channel, never the only one. */
+.engine-pill.partial {
+  border-color: var(--amber);
+}
+
+.engine-pill.partial b {
   color: var(--amber);
 }
 
@@ -415,7 +428,9 @@ button.engine-pill {
   top: 86px;
   left: 0;
   z-index: 20;
-  max-width: 420px;
+  /* Below ~440px the fixed 420px cap ran the panel past the right edge and
+     clipped the gate lines, which are the reason to open it at all. */
+  max-width: min(420px, calc(100vw - 24px));
   padding: 14px 16px;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
@@ -453,6 +468,85 @@ button.engine-pill {
 
 .engine-popover ul li b {
   color: var(--ink);
+}
+
+.engine-popover ul li.engine-path {
+  margin-bottom: 10px;
+}
+
+.engine-popover ul li.engine-path:last-child {
+  margin-bottom: 0;
+}
+
+.engine-path-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.engine-path-verdict {
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.engine-path-verdict.live {
+  color: var(--green);
+}
+
+.engine-path-verdict.advisory {
+  color: var(--amber);
+}
+
+.engine-path-verdict.off {
+  color: var(--muted);
+}
+
+.engine-path-effect {
+  display: block;
+  font-size: 11px;
+  font-style: italic;
+}
+
+.engine-path-gates {
+  display: block;
+  margin-top: 2px;
+}
+
+.engine-path-gates span {
+  display: block;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.gate-ok {
+  color: var(--muted);
+}
+
+.gate-off {
+  color: var(--amber);
+}
+
+.engine-mode-verdict {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--line-strong);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.03);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.engine-mode-verdict.ok {
+  border-left-color: var(--green);
+  color: var(--ink);
+}
+
+.engine-mode-verdict.warn {
+  border-left-color: var(--amber);
+  color: var(--ink);
+  font-weight: 700;
 }
 
 .engine-popover-close {

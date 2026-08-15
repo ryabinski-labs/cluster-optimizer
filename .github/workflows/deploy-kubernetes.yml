@@ -35,16 +35,25 @@ on:
         type: string
       enable_live_apply:
         description: >-
-          Live applier: patch workload requests in-cluster. Off by default.
+          Live applier: patch workload requests in-cluster. On by default.
           Requires DynamoDB persistence and manifests/rbac-applier.yaml.
-        default: false
+        default: true
         required: true
         type: boolean
       enable_live_nudge:
         description: >-
           Live nudger: cordon a node and evict its relocatable pods when
-          consolidation is feasible. Off by default.
-        default: false
+          consolidation is feasible. On by default. Requires DynamoDB
+          persistence, whose manifest is the only one carrying the gate.
+        default: true
+        required: true
+        type: boolean
+      enable_live_gc:
+        description: >-
+          Live completed-pod GC: delete Succeeded/Failed pods instead of only
+          listing them. On by default. Requires DynamoDB persistence, whose
+          manifest is the only one carrying the gate.
+        default: true
         required: true
         type: boolean
 
@@ -145,6 +154,7 @@ jobs:
           DYNAMODB_TABLE: ${{ inputs.dynamodb_table }}
           ENABLE_LIVE_APPLY: ${{ inputs.enable_live_apply }}
           ENABLE_LIVE_NUDGE: ${{ inputs.enable_live_nudge }}
+          ENABLE_LIVE_GC: ${{ inputs.enable_live_gc }}
         run: |
           manifest="manifests/cronjob.yaml"
           if [ "${ENABLE_DYNAMODB}" = "true" ]; then
@@ -156,6 +166,19 @@ jobs:
           # cannot establish from a single stdout-only run.
           if [ "${ENABLE_LIVE_APPLY}" = "true" ] && [ "${ENABLE_DYNAMODB}" != "true" ]; then
             echo "enable_live_apply requires enable_dynamodb; the applier has no run history without it."
+            exit 1
+          fi
+
+          # manifests/cronjob.yaml keeps these two gates commented out, and the
+          # gate() rewrite below only changes the value of an env var that
+          # already exists. Deploying dry-run while reporting success is worse
+          # than refusing, so refuse.
+          if [ "${ENABLE_LIVE_NUDGE}" = "true" ] && [ "${ENABLE_DYNAMODB}" != "true" ]; then
+            echo "enable_live_nudge requires enable_dynamodb; manifests/cronjob.yaml has no gate to turn on."
+            exit 1
+          fi
+          if [ "${ENABLE_LIVE_GC}" = "true" ] && [ "${ENABLE_DYNAMODB}" != "true" ]; then
+            echo "enable_live_gc requires enable_dynamodb; manifests/cronjob.yaml has no gate to turn on."
             exit 1
           fi
 
@@ -177,6 +200,7 @@ jobs:
             sed "s/value: cluster-optimizer-reports/value: ${DYNAMODB_TABLE}/" |
             gate CLUSTER_OPTIMIZER_AUTOAPPLY "${ENABLE_LIVE_APPLY}" |
             gate CLUSTER_OPTIMIZER_NUDGE_LIVE "${ENABLE_LIVE_NUDGE}" |
+            gate CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE "${ENABLE_LIVE_GC}" |
             kubectl apply -f -
 
       - name: Show deployment

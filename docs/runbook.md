@@ -190,38 +190,61 @@ Turning a gate on is a deploy-time decision, made through `Deploy Kubernetes`
 |---|---|
 | `enable_live_apply` | Sets `CLUSTER_OPTIMIZER_AUTOAPPLY=true`. Requires `enable_dynamodb=true` — the workflow fails fast otherwise, because the applier cannot establish the 3-consecutive-run history without persistence. |
 | `enable_live_nudge` | Sets `CLUSTER_OPTIMIZER_NUDGE_LIVE=true`, allowing the nudger to cordon a node and evict its relocatable pods. |
+| `enable_live_gc` | Sets `CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE=true`, allowing completed-pod cleanup to delete rather than list. |
 
-Both default to `false`, so a re-deploy that does not set them explicitly
-returns the cluster to dry-run. The `Show deployment` step prints the gate
-values it actually deployed. The `--auto-apply` / `--nudge` args and the halt
-ConfigMap are unaffected by these inputs; the halt switch still overrides both.
+**All three default to `true`.** A deploy that does not say otherwise leaves a
+cluster that patches workload requests, cordons and evicts for consolidation,
+and deletes completed pods. The `Show deployment` step prints the gate values
+it actually deployed. The `--auto-apply` / `--nudge` / `--gc-completed-pods`
+args and the halt ConfigMap are unaffected by these inputs; the halt switch
+still overrides all three.
 
-From a maintainer workstation, `scripts/deploy-kubernetes.sh` sets both inputs:
+`enable_live_nudge` and `enable_live_gc` also require `enable_dynamodb=true`:
+`manifests/cronjob.yaml` keeps their gates commented out and the workflow only
+rewrites an env var that already exists, so asking for them there would deploy
+dry-run while reporting success.
+
+From a maintainer workstation, `scripts/deploy-kubernetes.sh` sets all three:
 
 ```bash
 # Grant the applier its narrow patch permissions first, or every patch 403s.
 scripts/apply-rbac.sh --applier
 
-# Deploy live. Omitting the flags on the next deploy returns it to dry-run.
-scripts/deploy-kubernetes.sh --live-apply --live-nudge --wait
+# Deploy. Live on every path unless you say otherwise.
+scripts/deploy-kubernetes.sh --wait
 
-# Confirm the posture that actually landed.
-ENABLE_LIVE_APPLY=true ENABLE_LIVE_NUDGE=true scripts/verify-deployment.sh
+# Live apply + nudge, but leave completed-pod deletion advisory.
+scripts/deploy-kubernetes.sh --no-live-gc --wait
+
+# Back to fully advisory.
+scripts/deploy-kubernetes.sh --dry-run --wait
+
+# Confirm the posture that actually landed (defaults match a plain deploy).
+scripts/verify-deployment.sh
 ```
 
-The script refuses `--live-apply` / `--live-nudge` when `ENABLE_DYNAMODB=false`.
-For apply that mirrors the workflow's own check; for nudge it is stricter,
-because `manifests/cronjob.yaml` keeps both gates commented out and the
-workflow only rewrites an env var that already exists — asking for a live
-nudge there would deploy dry-run while reporting success.
+An explicit flag beats the matching `ENABLE_LIVE_*` environment variable, which
+beats the live-by-default value. With `ENABLE_DYNAMODB=false` the defaults fall
+back to dry-run with a note; a gate you asked for explicitly fails instead.
 
 `verify-deployment.sh` renders the expected CronJob with the same gate values,
-so tell it which posture you expect (`ENABLE_LIVE_APPLY` / `ENABLE_LIVE_NUDGE`,
-both defaulting to `false`) or it reports the live gates as config drift. It
-also prints a `Remediation mode: how it is decided` block — the same five
-checks the UI popover shows, read from the live CronJob — and the effective
-mode they add up to. That block is informational; dry-run is a valid posture,
-so it never fails the verification.
+so tell it which posture you expect (`ENABLE_LIVE_APPLY` / `ENABLE_LIVE_NUDGE` /
+`ENABLE_LIVE_GC`, all defaulting to `true` to match the deploy script) or it
+reports the drift. It also prints a `Remediation mode: how it is decided` block —
+the same checks the UI popover shows, read from the live CronJob — followed by
+the effective mode and a `Not enabled:` section naming every path that only
+reports, why, and the command that turns it on:
+
+```
+Effective mode: PARTLY LIVE (auto-apply, nudge) - only the paths named here mutate.
+Not enabled (these paths report findings but change nothing):
+  pod GC    : --gc-completed-pods is passed, but CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE is not true.
+       Turn it on: scripts/deploy-kubernetes.sh --live-gc
+```
+
+`LIVE` is reported only when every deployed path mutates; a mixed posture reads
+`PARTLY LIVE` and names the live paths. That block is informational: dry-run is
+a valid posture, so it never fails the verification.
 
 Because those checks read the CronJob, they describe the **next** run. A
 CronJob update only reaches Jobs created after it, so until the next tick the
@@ -230,8 +253,8 @@ the block says `LIVE`. The closing `Last run:` line names which of the two you
 are looking at:
 
 ```
-Effective mode: LIVE (auto-apply, nudge) - this cluster mutates workloads.
-Last run: cluster-optimizer-29779710 (2026-08-15T08:30:00Z) ran dry-run, not LIVE (auto-apply, nudge).
+Effective mode: LIVE (auto-apply, nudge, pod GC) - every remediation path mutates this cluster.
+Last run: cluster-optimizer-29779710 (2026-08-15T08:30:00Z) ran dry-run, not LIVE (auto-apply, nudge, pod GC).
        A CronJob update only reaches Jobs created after it, so the posture above
        first takes effect on the next scheduled run (*/30 * * * *).
        To exercise it now: scripts/verify-deployment.sh --run-job
@@ -241,25 +264,28 @@ Wait for the next scheduled run, or use `--run-job` to create one immediately
 from the current CronJob — on a live cluster that run mutates workloads. Once
 a run has used the posture the line reads `ran with this posture.` instead.
 
-`CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE` has no workflow input yet — it is
-still enabled by editing the manifest or patching the CronJob directly.
-
 ## Return to dry-run mode
 
-Fastest rollback is a re-deploy with both inputs `false`. To flip the running
-CronJob immediately without waiting on a workflow run:
+Fastest rollback is `scripts/deploy-kubernetes.sh --dry-run --wait`, or a
+workflow dispatch with all three inputs `false`. To flip the running CronJob
+immediately without waiting on a workflow run:
 
 ```bash
-# Remove either gate; both must be true to mutate.
-kubectl -n cluster-optimizer patch cronjob cluster-optimizer --type json \
-  -p '[{"op":"remove","path":"/spec/jobTemplate/spec/template/spec/containers/0/env/<index-of-CLUSTER_OPTIMIZER_AUTOAPPLY>"}]'
+# Set every env gate to "false" — each path needs both its gates to mutate.
+kubectl -n cluster-optimizer set env cronjob/cluster-optimizer \
+  CLUSTER_OPTIMIZER_AUTOAPPLY=false \
+  CLUSTER_OPTIMIZER_NUDGE_LIVE=false \
+  CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE=false
 
-# Or drop --auto-apply from args:
+# Or drop the flags from args:
 kubectl -n cluster-optimizer edit cronjob cluster-optimizer
-# then remove "--auto-apply" from .spec.jobTemplate.spec.template.spec.containers[0].args
+# then remove "--auto-apply", "--nudge" and "--gc-completed-pods" from
+# .spec.jobTemplate.spec.template.spec.containers[0].args
 ```
 
-The next run will be dry-run only.
+The next run will be dry-run only. For an immediate stop that covers runs
+already in flight, use the halt ConfigMap instead — it overrides every gate at
+run time and needs no redeploy.
 
 ## Update the targets ConfigMap
 
