@@ -1073,22 +1073,58 @@ button.engine-pill {
   color: var(--green);
 }
 
+/* Red is reserved for a fault. A cluster that is already minimal, held at its
+   floor, or whose constraints we cannot model is a correct outcome, not a
+   failure, so those states are neutral or amber — never alarming. */
+.overview-status.neutral {
+  border-color: var(--line-strong);
+  color: var(--muted);
+}
+
+.overview-status.unknown {
+  border-color: rgba(149, 101, 24, 0.4);
+  color: var(--amber);
+}
+
 .overview-status.blocked {
   border-color: rgba(168, 59, 52, 0.36);
   color: var(--red);
 }
 
+/* Provenance chip: the verdict is only worth what the evidence behind it is,
+   so the evidence class sits next to the verdict rather than in a tooltip. */
+.overview-evidence {
+  margin-left: auto;
+  padding: 5px 9px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.overview-evidence.weak {
+  border-color: rgba(149, 101, 24, 0.45);
+  color: var(--amber);
+}
+
 .overview-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 0.7fr) minmax(300px, 1.25fr) minmax(280px, 1fr);
+  grid-template-columns: minmax(220px, 0.75fr) minmax(320px, 1.3fr) minmax(280px, 1fr);
   gap: 10px;
   padding: 10px;
 }
 
 .overview-verdict,
-.overview-actions,
-.overview-rails {
+.overview-pools,
+.overview-blockers {
   min-height: 178px;
+}
+
+.overview-actions {
+  grid-column: 1 / -1;
 }
 
 .overview-verdict {
@@ -1105,13 +1141,20 @@ button.engine-pill {
   border-left-color: var(--green);
 }
 
+.overview-verdict.neutral {
+  border-left-color: var(--line-strong);
+}
+
+.overview-verdict.unknown {
+  border-left-color: var(--amber);
+}
+
 .overview-verdict.blocked {
   border-left-color: var(--red);
 }
 
 .overview-verdict span,
-.overview-action span,
-.rail span {
+.overview-action span {
   color: var(--muted);
   font-size: 10px;
   font-weight: 900;
@@ -1121,13 +1164,13 @@ button.engine-pill {
 .overview-verdict strong {
   margin-top: 8px;
   font-family: ui-serif, Georgia, "Times New Roman", serif;
-  font-size: clamp(28px, 4vw, 42px);
+  font-size: clamp(26px, 3.6vw, 40px);
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .overview-verdict p,
-.overview-action p,
-.rail small {
+.overview-action p {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
@@ -1138,52 +1181,164 @@ button.engine-pill {
   margin-top: 10px;
 }
 
-.overview-rails,
-.overview-actions {
+.overview-pools,
+.overview-blockers {
   display: grid;
+  align-content: start;
   gap: 8px;
-}
-
-.rail,
-.overview-action {
+  padding: 12px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel);
 }
 
-.rail {
+.overview-actions {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 8px;
-  padding: 10px;
 }
 
-.rail header {
+.overview-subhead {
   display: flex;
-  gap: 12px;
-  align-items: baseline;
-  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
-.rail b,
-.overview-action strong {
-  font-family: ui-serif, Georgia, "Times New Roman", serif;
-  font-size: 20px;
-  font-weight: 500;
+.subhead-count:empty {
+  display: none;
 }
 
-.rail i {
-  display: block;
-  height: 9px;
-  overflow: hidden;
+.subhead-count {
+  min-width: 18px;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
   border-radius: 999px;
-  background: #e7e1d2;
+  font-size: 10px;
+  text-align: center;
 }
 
-.rail em {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, var(--blue), var(--green));
+.pool-list {
+  display: grid;
+  gap: 6px;
+}
+
+/* One row per pool: name, the count change, its state, and — the part that
+   makes the row worth reading — the single constraint that binds it. */
+.pool-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1.1fr) auto minmax(74px, auto);
+  gap: 2px 10px;
+  align-items: baseline;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--paper);
+}
+
+.pool-row.fits {
+  border-left-color: var(--green);
+}
+
+.pool-row.at_floor,
+.pool-row.at_minimum {
+  border-left-color: var(--line-strong);
+}
+
+.pool-row.indeterminate {
+  border-left-color: var(--amber);
+}
+
+.pool-name {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-count {
+  font-family: ui-serif, Georgia, "Times New Roman", serif;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pool-status {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-align: right;
+  text-transform: uppercase;
+}
+
+.pool-binding {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.pool-empty,
+.blocker-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.blocker-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Ordered by how many pods each cause blocks, so the thing worth fixing
+   first is at the top rather than buried in a flat list. */
+.blocker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--paper);
+}
+
+.blocker-label {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.blocker-count {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.blocker-scope {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.blocker small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  overflow-wrap: anywhere;
 }
 
 .overview-action {
@@ -1193,6 +1348,16 @@ button.engine-pill {
   align-content: center;
   min-height: 54px;
   padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.overview-action strong {
+  font-family: ui-serif, Georgia, "Times New Roman", serif;
+  font-size: 20px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .overview-action p {

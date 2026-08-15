@@ -132,7 +132,11 @@ type trendPoint struct {
 	NodeCount          int64     `json:"node_count"`
 	RequestedMemoryMiB int64     `json:"requested_memory_mib"`
 	ObservedMemoryMiB  *int64    `json:"observed_memory_mib,omitempty"`
-	TwoNodeFeasible    *bool     `json:"two_node_feasible,omitempty"`
+	// MinimumSafeNodes / RemovableNodes replace the old two-node feasibility
+	// boolean: the count moves run to run, so it plots into something an
+	// operator can read a direction off.
+	MinimumSafeNodes *int64 `json:"minimum_safe_nodes,omitempty"`
+	RemovableNodes   *int64 `json:"removable_nodes,omitempty"`
 }
 
 type recommendationRollup struct {
@@ -1024,7 +1028,8 @@ func (s *server) buildTrend(reports []reportRecord, rollups map[string]recommend
 			NodeCount:          intFromSummary(report.Summary, "node_count"),
 			RequestedMemoryMiB: intFromSummary(report.Summary, "requested_memory_mib"),
 			ObservedMemoryMiB:  optionalIntFromSummary(report.Summary, "observed_memory_mib"),
-			TwoNodeFeasible:    twoNodeFeasible(report.Summary),
+			MinimumSafeNodes:   minimumSafeNodes(report.Summary),
+			RemovableNodes:     removableNodes(report.Summary),
 		})
 	}
 	top := make([]recommendationRollup, 0, len(rollups))
@@ -1547,16 +1552,37 @@ func optionalIntFromSummary(summary map[string]any, key string) *int64 {
 	return nil
 }
 
-func twoNodeFeasible(summary map[string]any) *bool {
-	raw, ok := summary["two_node_estimate"].(map[string]any)
-	if !ok {
+// capacitySummary pulls the minimum-safe-node block out of a persisted
+// report. Reports are read back as generic JSON, so the struct written by the
+// engine arrives here as a map.
+func capacitySummary(summary map[string]any) map[string]any {
+	raw, _ := summary["capacity"].(map[string]any)
+	return raw
+}
+
+// minimumSafeNodes replaces the former two-node feasibility boolean in the
+// trend series. A boolean that read "false" on almost every run for almost
+// every cluster carried no information over time; the node count it was
+// standing in for actually moves, so plot that instead.
+func minimumSafeNodes(summary map[string]any) *int64 {
+	capacity := capacitySummary(summary)
+	if capacity == nil {
+		// A report from before the capacity engine. Break the line rather
+		// than plotting a zero that would read as "no nodes needed".
 		return nil
 	}
-	value, ok := raw["feasible"].(bool)
-	if !ok {
+	// A pool the engine could not evaluate contributes its current node count
+	// to the minimum, so an unevaluable cluster plots as "no reduction
+	// claimed" rather than as a false floor.
+	return optionalIntFromSummary(capacity, "minimum_safe_nodes")
+}
+
+func removableNodes(summary map[string]any) *int64 {
+	capacity := capacitySummary(summary)
+	if capacity == nil {
 		return nil
 	}
-	return &value
+	return optionalIntFromSummary(capacity, "removable_nodes")
 }
 
 func ruleSupported(target remediationTarget, ruleID string) bool {

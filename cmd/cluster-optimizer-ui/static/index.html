@@ -102,12 +102,13 @@
           </div>
         </section>
 
-        <section class="optimization-overview" aria-label="Optimization overview">
+        <section class="optimization-overview" aria-label="Capacity fit">
           <header class="overview-head">
             <div>
-              <p id="overviewKicker">Optimization Overview</p>
-              <h2 id="overviewTitle">Capacity Fit</h2>
+              <p id="overviewKicker">Capacity Fit</p>
+              <h2 id="overviewTitle">Minimum safe node count</h2>
             </div>
+            <span id="overviewEvidence" class="overview-evidence" title="What kind of usage data this verdict rests on">-</span>
             <span id="overviewStatus" class="overview-status">-</span>
           </header>
           <div class="overview-grid">
@@ -116,31 +117,16 @@
               <strong>-</strong>
               <p>-</p>
             </article>
-            <div class="overview-rails" aria-label="Fit guardrails">
-              <div class="rail">
-                <header>
-                  <span>CPU headroom</span>
-                  <b id="overviewCpuHeadroom">-</b>
-                </header>
-                <i><em id="overviewCpuBar"></em></i>
-                <small id="overviewCpuTarget">-</small>
-              </div>
-              <div class="rail">
-                <header>
-                  <span>Memory headroom</span>
-                  <b id="overviewMemHeadroom">-</b>
-                </header>
-                <i><em id="overviewMemBar"></em></i>
-                <small id="overviewMemTarget">-</small>
-              </div>
-              <div class="rail">
-                <header>
-                  <span>Observed vs requested</span>
-                  <b id="overviewObservedRatio">-</b>
-                </header>
-                <i><em id="overviewObservedBar"></em></i>
-                <small id="overviewObservedDelta">-</small>
-              </div>
+            <div class="overview-pools" aria-label="Per-pool verdicts">
+              <h3 class="overview-subhead">By node pool</h3>
+              <div id="overviewPools" class="pool-list"></div>
+            </div>
+            <div class="overview-blockers" aria-label="What stands between the cluster and fewer nodes">
+              <h3 class="overview-subhead">
+                What stands between
+                <span id="overviewBlockerCount" class="subhead-count"></span>
+              </h3>
+              <ul id="overviewBlockers" class="blocker-list"></ul>
             </div>
             <div id="overviewActions" class="overview-actions" aria-label="Current optimization actions"></div>
           </div>

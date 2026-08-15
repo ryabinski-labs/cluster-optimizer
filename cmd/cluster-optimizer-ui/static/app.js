@@ -36,15 +36,10 @@ const els = {
   overviewTitle: document.querySelector("#overviewTitle"),
   overviewStatus: document.querySelector("#overviewStatus"),
   overviewVerdict: document.querySelector("#overviewVerdict"),
-  overviewCpuHeadroom: document.querySelector("#overviewCpuHeadroom"),
-  overviewCpuBar: document.querySelector("#overviewCpuBar"),
-  overviewCpuTarget: document.querySelector("#overviewCpuTarget"),
-  overviewMemHeadroom: document.querySelector("#overviewMemHeadroom"),
-  overviewMemBar: document.querySelector("#overviewMemBar"),
-  overviewMemTarget: document.querySelector("#overviewMemTarget"),
-  overviewObservedRatio: document.querySelector("#overviewObservedRatio"),
-  overviewObservedBar: document.querySelector("#overviewObservedBar"),
-  overviewObservedDelta: document.querySelector("#overviewObservedDelta"),
+  overviewEvidence: document.querySelector("#overviewEvidence"),
+  overviewPools: document.querySelector("#overviewPools"),
+  overviewBlockers: document.querySelector("#overviewBlockers"),
+  overviewBlockerCount: document.querySelector("#overviewBlockerCount"),
   overviewActions: document.querySelector("#overviewActions"),
   trendKicker: document.querySelector("#trendKicker"),
   trendDays: document.querySelector("#trendDays"),
@@ -289,68 +284,285 @@ function renderSummary(report) {
   els.metricObservedMem.textContent = formatMiB(summary.observed_memory_mib);
 }
 
+// Human labels for the binpack predicate names. The engine emits stable
+// identifiers; the UI is where they become something an operator reads.
+const BLOCKER_LABELS = {
+  insufficient_cpu: "CPU requests leave no room",
+  insufficient_memory: "Memory requests leave no room",
+  insufficient_extended_resource: "A device or vendor resource is unavailable",
+  node_pod_capacity: "The node's pod cap is reached",
+  untolerated_taint: "A taint no pod tolerates",
+  node_selector: "A nodeSelector pins pods to specific nodes",
+  node_affinity: "Required node affinity pins pods to specific nodes",
+  pod_anti_affinity: "Anti-affinity forces one replica per node",
+  topology_spread: "A topology spread constraint forbids the placement",
+  no_candidate_nodes: "No node in the pool can take these pods",
+};
+
+const UNMODELLED_LABELS = {
+  extended_resource: "a device-plugin resource we do not track",
+  volume_node_affinity: "a persistent volume that may pin pods to nodes",
+  spread_match_label_keys: "newer topology-spread fields we do not evaluate",
+  affinity_namespace_selector: "a namespaceSelector on an affinity rule",
+  runtime_class_overhead: "RuntimeClass overhead on a pod",
+  required_pod_affinity: "required pod affinity, which is order-dependent",
+};
+
+const EVIDENCE_LABELS = {
+  historical_p95: "historical p95",
+  recommender: "VPA recommendation",
+  sampled_rollup: "sampled p95",
+  instant: "single live sample",
+  none: "no usage data",
+};
+
+// Fidelities that span time and can therefore justify removing capacity.
+// Mirrors usage.Fidelity.Actionable() in Go; kept as an allowlist here for
+// the same reason it is one there — a new weak source must not silently
+// inherit permission to act.
+const ACTIONABLE_EVIDENCE = new Set(["historical_p95", "recommender", "sampled_rollup"]);
+
 function renderOptimizationOverview(report) {
   if (!report) {
-    els.overviewKicker.textContent = "Optimization Overview";
-    els.overviewTitle.textContent = "Capacity Fit";
+    els.overviewKicker.textContent = "Capacity Fit";
+    els.overviewTitle.textContent = "Minimum safe node count";
     els.overviewStatus.textContent = "-";
     els.overviewStatus.className = "overview-status";
-    setVerdict("No report selected", "-", "Load a report to evaluate node fit and optimization blockers.", "neutral");
-    setRail(els.overviewCpuHeadroom, els.overviewCpuBar, els.overviewCpuTarget, "-", 0, "-");
-    setRail(els.overviewMemHeadroom, els.overviewMemBar, els.overviewMemTarget, "-", 0, "-");
-    setRail(els.overviewObservedRatio, els.overviewObservedBar, els.overviewObservedDelta, "-", 0, "-");
+    els.overviewEvidence.textContent = "";
+    els.overviewEvidence.hidden = true;
+    setVerdict("No report selected", "-", "Load a report to see how few nodes this cluster can safely run on.", "neutral");
+    els.overviewPools.replaceChildren();
+    els.overviewBlockers.replaceChildren();
+    els.overviewBlockerCount.textContent = "";
     els.overviewActions.replaceChildren();
     return;
   }
 
   const summary = report.summary || {};
-  const twoNode = summary.two_node_estimate || {};
+  const capacity = summary.capacity;
   const currentNodes = Number(summary.node_count || 0);
-  const feasible = twoNode.feasible === true;
-  const alreadyAtTarget = currentNodes > 0 && currentNodes <= 2;
-  const requestedMem = Number(summary.requested_memory_mib || 0);
-  const observedMem = Number(summary.observed_memory_mib || 0);
-  const observedRatio = requestedMem > 0 ? observedMem / requestedMem : 0;
-  const memDelta = requestedMem - observedMem;
+  els.overviewKicker.textContent = "Capacity Fit";
+  els.overviewTitle.textContent = "Minimum safe node count";
 
-  els.overviewKicker.textContent = `${formatNumber(currentNodes)} node${currentNodes === 1 ? "" : "s"} observed`;
-  els.overviewTitle.textContent = alreadyAtTarget ? "Running At Floor" : "Two-Node Fit";
-  els.overviewStatus.textContent = feasible || alreadyAtTarget ? "Fit viable" : "Blocked";
-  els.overviewStatus.className = `overview-status ${feasible || alreadyAtTarget ? "good" : "blocked"}`;
-
-  if (alreadyAtTarget) {
-    setVerdict("Operating at target", "2 nodes", "The cluster is already at the minimum configured node-pool size.", "good");
-  } else if (feasible) {
-    setVerdict("Scale-down candidate", "2 nodes", "Requested resources clear the CPU and memory headroom guardrails.", "good");
-  } else {
-    setVerdict("Scale-down blocked", "2 nodes", twoNode.reason || "Requested resources do not clear the two-node headroom guardrails.", "blocked");
+  // A report from before the capacity engine, or a run that could not gather
+  // evidence. Say so plainly rather than rendering an empty card that looks
+  // like a verdict of zero.
+  if (!capacity) {
+    els.overviewStatus.textContent = "Not evaluated";
+    els.overviewStatus.className = "overview-status neutral";
+    els.overviewEvidence.textContent = "";
+    els.overviewEvidence.hidden = true;
+    setVerdict(
+      "No capacity verdict",
+      `${formatNumber(currentNodes)} node${currentNodes === 1 ? "" : "s"}`,
+      "This report predates the minimum-safe-node engine, or the run could not evaluate placement.",
+      "neutral"
+    );
+    els.overviewPools.replaceChildren();
+    els.overviewBlockers.replaceChildren();
+    els.overviewBlockerCount.textContent = "";
+    renderOverviewActions(report);
+    return;
   }
 
-  setRail(
-    els.overviewCpuHeadroom,
-    els.overviewCpuBar,
-    els.overviewCpuTarget,
-    formatCPU(Number(twoNode.cpu_headroom_m || 0)),
-    ratio(Number(twoNode.cpu_headroom_m || 0), Number(twoNode.minimum_cpu_headroom_m || 0)),
-    `minimum ${formatCPU(Number(twoNode.minimum_cpu_headroom_m || 0))}`
-  );
-  setRail(
-    els.overviewMemHeadroom,
-    els.overviewMemBar,
-    els.overviewMemTarget,
-    formatMiB(twoNode.memory_headroom_mib),
-    ratio(Number(twoNode.memory_headroom_mib || 0), Number(twoNode.minimum_memory_headroom_mib || 0)),
-    `minimum ${formatMiB(twoNode.minimum_memory_headroom_mib)}`
-  );
-  setRail(
-    els.overviewObservedRatio,
-    els.overviewObservedBar,
-    els.overviewObservedDelta,
-    requestedMem > 0 ? `${Math.round(observedRatio * 100)}%` : "-",
-    Math.max(0, Math.min(1, observedRatio)),
-    memDelta > 0 ? `${formatMiB(memDelta)} requested above observed` : "observed usage meets request"
-  );
+  const pools = capacity.pools || [];
+  const minimum = Number(capacity.minimum_safe_nodes || 0);
+  const removable = Number(capacity.removable_nodes || 0);
+  const indeterminate = pools.filter((p) => p.status === "indeterminate");
+  // Two independent reasons a verdict may not be enforceable, kept apart on
+  // purpose: the usage evidence may be too thin, or a pool may contain
+  // constraints the engine cannot model. Collapsing them into one flag makes
+  // the card blame the wrong thing and send the operator to fix the wrong
+  // problem.
+  const evidenceOk = ACTIONABLE_EVIDENCE.has(capacity.usage_fidelity);
+  const actionable = capacity.actionable === true;
+
+  els.overviewEvidence.hidden = false;
+  els.overviewEvidence.textContent = evidenceLabel(capacity);
+  els.overviewEvidence.title = capacity.usage_note
+    ? capacity.usage_note
+    : `Verdict computed from ${EVIDENCE_LABELS[capacity.usage_fidelity] || capacity.usage_fidelity} usage data.`;
+  // The chip reports evidence strength only — never the pool-modelling gap.
+  els.overviewEvidence.className = `overview-evidence ${evidenceOk ? "" : "weak"}`.trim();
+
+  // A pool we could not evaluate is a caveat on the answer, not a substitute
+  // for it. If other pools can still give nodes back, that is the headline
+  // and the unevaluated pool is a qualifier — burying a real saving behind
+  // "cannot say" would be its own kind of dishonesty.
+  const caveat = indeterminate.length
+    ? ` ${indeterminate.map((p) => p.pool).join(", ")} could not be evaluated and ${indeterminate.length === 1 ? "is" : "are"} excluded.`
+    : "";
+
+  // Tone rules: red is reserved for something being wrong. A cluster that is
+  // already minimal, or that genuinely needs its capacity, is a correct
+  // outcome and must not read as a fault.
+  if (removable > 0) {
+    const plural = removable === 1 ? "" : "s";
+    let detail;
+    if (!evidenceOk) {
+      // Name the fixable thing. This is the one case with a clear next step.
+      detail = `${formatNumber(removable)} node${plural} look releasable, but the verdict rests on ${EVIDENCE_LABELS[capacity.usage_fidelity] || "weak"} data, which cannot tell an idle workload from one caught between bursts. Point the engine at a Prometheus endpoint to enable enforcement.`;
+    } else if (capacity.survive_node_loss) {
+      detail = `${formatNumber(removable)} node${plural} can be released, and the workload still places after losing one more.`;
+    } else {
+      // The survival gate was not run, so the card must not imply it passed.
+      detail = `${formatNumber(removable)} node${plural} can be released. This run did not require the workload to survive losing a node — set CLUSTER_OPTIMIZER_SURVIVE_NODE_LOSS=true for that guarantee.`;
+    }
+    els.overviewStatus.textContent = actionable ? "Can shrink" : "Advisory";
+    els.overviewStatus.className = `overview-status ${actionable ? "good" : "neutral"}`;
+    setVerdict(
+      "Minimum safe node count",
+      `${formatNumber(currentNodes)} → ${formatNumber(minimum)}`,
+      detail + caveat,
+      actionable ? "good" : "neutral"
+    );
+  } else if (indeterminate.length === pools.length && pools.length > 0) {
+    els.overviewStatus.textContent = "Indeterminate";
+    els.overviewStatus.className = "overview-status unknown";
+    setVerdict(
+      "Cannot say",
+      `${formatNumber(currentNodes)} node${currentNodes === 1 ? "" : "s"}`,
+      "Every pool contains constraints this engine does not model, so it makes no scale-down claim at all. Enforcement stays blocked.",
+      "unknown"
+    );
+  } else {
+    const floorBound = pools.some((p) => p.status === "at_floor");
+    els.overviewStatus.textContent = floorBound ? "At floor" : "Correctly sized";
+    els.overviewStatus.className = "overview-status neutral";
+    setVerdict(
+      floorBound ? "Held at the configured floor" : "Already at minimum",
+      `${formatNumber(currentNodes)} node${currentNodes === 1 ? "" : "s"}`,
+      (floorBound
+        ? "The workload would fit on fewer nodes, but the configured floor stops here. Lower CLUSTER_OPTIMIZER_NODE_FLOOR to go further."
+        : "Every node is carrying work that has nowhere else to go. There is nothing to reclaim.") + caveat,
+      "neutral"
+    );
+  }
+
+  renderPoolRows(pools);
+  renderBlockers(pools);
   renderOverviewActions(report);
+}
+
+function evidenceLabel(capacity) {
+  const fidelity = capacity.usage_fidelity || "none";
+  const label = EVIDENCE_LABELS[fidelity] || fidelity;
+  const source = capacity.usage_source ? ` · ${capacity.usage_source}` : "";
+  return `evidence: ${label}${source}`;
+}
+
+// One row per pool. Each names its own binding constraint, because "the
+// cluster can shrink" is not actionable until you know which pool and why.
+function renderPoolRows(pools) {
+  els.overviewPools.replaceChildren();
+  if (pools.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "pool-empty";
+    empty.textContent = "No node pools were found in this report.";
+    els.overviewPools.append(empty);
+    return;
+  }
+  pools.forEach((pool) => {
+    const row = document.createElement("div");
+    row.className = `pool-row ${pool.status}`;
+
+    const current = Number(pool.current_nodes || 0);
+    const min = Number(pool.minimum_safe_nodes || 0);
+    const target = pool.status === "indeterminate" ? "—" : formatNumber(min);
+
+    row.innerHTML = `
+      <span class="pool-name" title="${escapeHtml(pool.pool)}">${escapeHtml(pool.pool)}</span>
+      <span class="pool-count"><b>${formatNumber(current)}</b> → <b>${target}</b></span>
+      <span class="pool-status">${escapeHtml(poolStatusLabel(pool))}</span>
+      <span class="pool-binding">${escapeHtml(poolBindingText(pool))}</span>
+    `;
+    els.overviewPools.append(row);
+  });
+}
+
+function poolStatusLabel(pool) {
+  switch (pool.status) {
+    case "fits":
+      return `${formatNumber(Number(pool.removable_nodes || 0))} releasable`;
+    case "at_floor":
+      return "at floor";
+    case "at_minimum":
+      return "at minimum";
+    case "indeterminate":
+      return "indeterminate";
+    default:
+      return pool.status || "-";
+  }
+}
+
+function poolBindingText(pool) {
+  if (pool.status === "indeterminate") {
+    const reasons = (pool.indeterminate_reasons || []).map((r) => UNMODELLED_LABELS[r] || r);
+    return reasons.length ? `not modelled: ${reasons.join("; ")}` : "not modelled";
+  }
+  if (pool.status === "at_floor") {
+    return `floor of ${formatNumber(Number(pool.configured_floor || 0))}; workload would fit ${formatNumber(Number(pool.derived_minimum || 0))}`;
+  }
+  const blocker = (pool.blockers || [])[0];
+  if (blocker) {
+    return BLOCKER_LABELS[blocker.reason] || blocker.reason;
+  }
+  return pool.binding_constraint || "—";
+}
+
+// The blocker list is ordered by how many pods each cause blocks, so the
+// thing worth fixing first is at the top rather than buried in a flat list.
+function renderBlockers(pools) {
+  els.overviewBlockers.replaceChildren();
+
+  const merged = new Map();
+  pools.forEach((pool) => {
+    (pool.blockers || []).forEach((blocker) => {
+      const key = blocker.reason;
+      const existing = merged.get(key) || { reason: key, pods: 0, pools: [], examples: [] };
+      existing.pods += Number(blocker.pods || 0);
+      existing.pools.push(pool.pool);
+      (blocker.examples || []).forEach((ex) => {
+        if (existing.examples.length < 3) existing.examples.push(ex);
+      });
+      merged.set(key, existing);
+    });
+  });
+
+  const list = [...merged.values()].sort((a, b) => b.pods - a.pods);
+  els.overviewBlockerCount.textContent = list.length ? String(list.length) : "";
+
+  if (list.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "blocker-empty";
+    // A pool held at its floor has no packing blocker, but something is
+    // plainly stopping it. Saying "nothing is blocking" there would send an
+    // operator looking for a workload problem that does not exist.
+    const floorBound = pools.filter((p) => p.status === "at_floor");
+    if (floorBound.length > 0) {
+      empty.textContent = `Nothing in the workload. ${floorBound.map((p) => p.pool).join(", ")} ${floorBound.length === 1 ? "is" : "are"} held by the configured node floor, not by anything scheduled on ${floorBound.length === 1 ? "it" : "them"}.`;
+    } else {
+      empty.textContent = "Nothing is blocking further consolidation.";
+    }
+    els.overviewBlockers.append(empty);
+    return;
+  }
+
+  list.forEach((blocker) => {
+    const item = document.createElement("li");
+    item.className = "blocker";
+    const label = BLOCKER_LABELS[blocker.reason] || blocker.reason;
+    const examples = blocker.examples.length
+      ? `<small>${escapeHtml(blocker.examples.join(", "))}</small>`
+      : "";
+    item.innerHTML = `
+      <span class="blocker-label">${escapeHtml(label)}</span>
+      <span class="blocker-scope">${escapeHtml(blocker.pools.join(", "))}</span>
+      <span class="blocker-count">${formatNumber(blocker.pods)} pod${blocker.pods === 1 ? "" : "s"}</span>
+      ${examples}
+    `;
+    els.overviewBlockers.append(item);
+  });
 }
 
 function setVerdict(label, value, detail, tone) {
@@ -360,12 +572,6 @@ function setVerdict(label, value, detail, tone) {
     <strong>${escapeHtml(value)}</strong>
     <p>${escapeHtml(detail)}</p>
   `;
-}
-
-function setRail(valueEl, barEl, targetEl, value, progress, target) {
-  valueEl.textContent = value;
-  barEl.style.width = `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`;
-  targetEl.textContent = target;
 }
 
 function renderOverviewActions(report) {
@@ -861,6 +1067,13 @@ function dateDivider(ts) {
   return wrap;
 }
 
+// Events whose subject is a node rather than a workload. They share a scope
+// layout and a summary chip, but say opposite things: cordon_evict takes a
+// node out of service, uncordon_stale puts one back.
+function isNodeEvent(event) {
+  return event.kind === "cordon_evict" || event.kind === "uncordon_stale";
+}
+
 function partitionGroupEvents(events) {
   const active = [];
   const skips = [];
@@ -876,7 +1089,7 @@ function partitionGroupEvents(events) {
     if (event.halt_active) return 0;
     if (event.error || event.eviction_errors > 0) return 1;
     if (event.applied) return 2;
-    if (event.kind === "cordon_evict") return 3;
+    if (isNodeEvent(event)) return 3;
     if (event.mode === "dry-run") return 4;
     return 5;
   };
@@ -1089,7 +1302,7 @@ function summarizeRun(events) {
   events.forEach((event) => {
     if (event.error || event.eviction_errors > 0) { errors++; return; }
     if (event.kind === "skip") { skips++; return; }
-    if (event.kind === "cordon_evict") { cordons++; return; }
+    if (isNodeEvent(event)) { cordons++; return; }
     if (event.applied) applied++;
     else if (event.mode === "dry-run") dry++;
   });
@@ -1131,9 +1344,11 @@ function activityRow(input) {
 
   const scope = document.createElement("div");
   scope.className = "scope";
-  if (event.kind === "cordon_evict") {
-    const target = event.target_node ? `node ${event.target_node}` : "consolidation pass";
-    scope.innerHTML = `<strong>${escapeHtml(target)}</strong><code>node action</code>`;
+  if (isNodeEvent(event)) {
+    const fallback = event.kind === "uncordon_stale" ? "stale-cordon sweep" : "consolidation pass";
+    const target = event.target_node ? `node ${event.target_node}` : fallback;
+    const chip = event.kind === "uncordon_stale" ? "returned to service" : "node action";
+    scope.innerHTML = `<strong>${escapeHtml(target)}</strong><code>${chip}</code>`;
   } else {
     const scopeText = [event.namespace, event.workload].filter(Boolean).join("/") || "cluster";
     const container = event.container ? ` · container ${escapeHtml(event.container)}` : "";
@@ -1209,6 +1424,13 @@ function skipChangeSummary(event) {
 }
 
 function changeSummary(event) {
+  if (event.kind === "uncordon_stale") {
+    // The reaper's rows are the inverse of a consolidation: capacity coming
+    // back, not going away. A run of these means drained nodes are never
+    // being removed, so say that rather than showing a bare dash.
+    if (event.error) return escapeHtml(event.error);
+    return `<b>uncordoned</b> · ${escapeHtml(event.reason || "cordon had outlived its TTL")}`;
+  }
   if (event.kind === "cordon_evict") {
     const parts = [];
     if (event.evicted > 0 || event.eviction_errors > 0) {
@@ -1571,11 +1793,6 @@ function formatCPU(value) {
 function formatNumber(value) {
   if (value === undefined || value === null) return "-";
   return Number(value).toLocaleString();
-}
-
-function ratio(value, minimum) {
-  if (!minimum) return 0;
-  return Math.max(0, value / minimum);
 }
 
 function topSeverity(rollup) {

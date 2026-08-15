@@ -100,6 +100,42 @@ The nudger only cordons; it never deletes nodes. A cordoned-and-empty node
 will be picked up by the DOKS autoscaler if you have one enabled. If you do
 not run an autoscaler, uncordoning is the right action.
 
+### Which cordons are the optimizer's?
+
+Cordons the nudger placed carry ownership annotations. To list them:
+
+```bash
+kubectl get nodes \
+  -o custom-columns=NODE:.metadata.name,\
+UNSCHEDULABLE:.spec.unschedulable,\
+CORDONED_AT:.metadata.annotations.cluster-optimizer\\.io/cordoned-at,\
+BY_RUN:.metadata.annotations.cluster-optimizer\\.io/cordoned-by-run
+```
+
+A node with `CORDONED_AT` set is ours. A node cordoned with no such annotation
+was cordoned by a human or another controller, and the optimizer will never
+reverse it.
+
+### Stale cordons reverse themselves
+
+You usually do not need to uncordon by hand. Each run reverses cordons the
+optimizer placed that have outlived `CLUSTER_OPTIMIZER_CORDON_TTL` (default
+`30m`) — this covers both a run that died mid-drain and a drain that completed
+but that nothing ever acted on. The node's pre-cordon schedulability is
+restored and an `uncordon_stale` row appears in the remediation feed.
+
+Two cases where you should still intervene:
+
+- **The halt switch is set.** Halt means the optimizer touches nothing,
+  including the reaper. Uncordon by hand, or clear the halt.
+- **`uncordon_stale` rows keep appearing for the same node.** Consolidation is
+  working and nothing is removing the drained node. Either enable an
+  autoscaler, remove the node yourself, or turn nudging off — as it stands the
+  cluster is being drained and refilled for no saving.
+
+To disable reaping entirely and restore the previous
+cordon-and-leave-it behaviour, set `CLUSTER_OPTIMIZER_CORDON_TTL=0`.
+
 ## Suspend the CronJob
 
 To stop the optimizer from running on its schedule without uninstalling:

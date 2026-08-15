@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"time"
 
 	"github.com/GipsyChef/cluster-optimizer/internal/applier"
 	corev1 "k8s.io/api/core/v1"
@@ -26,16 +27,39 @@ type Options struct {
 	HaltNamespace string
 	HaltConfigMap string
 	HaltKey       string
+	// CordonTTL is how long a cordon this tool placed may stand before the
+	// reaper reverses it. Zero disables reaping entirely, which restores the
+	// pre-reaper behaviour of leaving cordons in place indefinitely.
+	CordonTTL time.Duration
+	// RecordonCooldown keeps a reaped node out of the candidate set for a
+	// while, so reaping cannot become a cordon/evict/uncordon loop.
+	RecordonCooldown time.Duration
+	// RunID identifies this invocation on the cordons it places. Left empty,
+	// NudgePodsWithResult generates one.
+	RunID string
+	// now is a test seam. Nil means time.Now.
+	now func() time.Time
 }
 
 // NewOptions returns Options with the same safe defaults as the applier
-// (dry-run, halt switch at cluster-optimizer/cluster-optimizer-halt).
+// (dry-run, halt switch at cluster-optimizer/cluster-optimizer-halt) plus
+// stale-cordon reaping enabled.
 func NewOptions() Options {
 	return Options{
-		HaltNamespace: applier.DefaultHaltNamespace,
-		HaltConfigMap: applier.DefaultHaltConfigMap,
-		HaltKey:       applier.DefaultHaltKey,
+		HaltNamespace:    applier.DefaultHaltNamespace,
+		HaltConfigMap:    applier.DefaultHaltConfigMap,
+		HaltKey:          applier.DefaultHaltKey,
+		CordonTTL:        DefaultCordonTTL,
+		RecordonCooldown: DefaultRecordonCooldown,
 	}
+}
+
+// clock returns the time source for this run.
+func (o Options) clock() time.Time {
+	if o.now != nil {
+		return o.now()
+	}
+	return time.Now()
 }
 
 // Result summarises one NudgePods run for downstream persistence (the
@@ -51,6 +75,9 @@ type Result struct {
 	Evicted           int
 	EvictionErrors    int
 	NotFeasibleReason string
+	// Reap records what the stale-cordon pass did before this run looked for
+	// a new consolidation target.
+	Reap ReapResult
 }
 
 // NudgePods scans the cluster nodes and active pods, determines if any node's
@@ -80,6 +107,10 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 
 	if opts.Live {
 		if halted, reason := nudgerHaltCheck(ctx, clientset, opts); halted {
+			// The reaper stays behind this gate on purpose. Halt means "this
+			// tool touches nothing"; an operator who needs a stale cordon
+			// reversed while halted can find it by its annotations and
+			// uncordon it by hand.
 			log.Printf("Active Nudger: halt switch active (%s), refusing to cordon", reason)
 			result.Halted = true
 			result.HaltReason = reason
@@ -87,7 +118,27 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 		}
 	}
 
-	// 1. Fetch all nodes
+	runID := opts.RunID
+	if runID == "" {
+		runID = newRunID()
+	}
+	now := opts.clock()
+
+	// 0. Repair before extending. A previous run that died between cordoning
+	// and evicting leaves a node unschedulable with nothing to ever undo it,
+	// and a drain nothing acted on is lost capacity rather than work in
+	// progress. Reverse those first so this run sees the cluster's real
+	// schedulable capacity instead of the residue of past failures.
+	result.Reap = ReapStaleCordons(ctx, clientset, opts.Live, runID, opts.CordonTTL, now)
+	for _, msg := range result.Reap.Errors {
+		log.Printf("Active Nudger: stale-cordon reap failed: %s", msg)
+	}
+	if len(result.Reap.Uncordoned) > 0 && !opts.Live {
+		log.Printf("Active Nudger DRY-RUN: would reverse %d stale cordon(s): %v", len(result.Reap.Uncordoned), result.Reap.Uncordoned)
+	}
+
+	// 1. Fetch all nodes. This runs after the reap so any node just returned
+	// to service counts toward the packing simulation below.
 	nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return result, fmt.Errorf("failed to list nodes: %w", err)
@@ -202,17 +253,34 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 
 	// 5. Filter nodes that are candidates for emptying.
 	// We want to find a node whose relocatable pods can be completely rescheduled onto the other *schedulable* nodes.
+	// Two distinct questions, deliberately separated: which nodes can receive
+	// pods, and which nodes may be emptied. A node in re-cordon cooldown is
+	// still perfectly good capacity — it just must not be drained again yet.
+	var schedulableCount int
 	var candidateNodes []*nodeState
 	for _, ns := range nodesMap {
 		if !ns.isSchedulable {
 			continue // Node is already cordoned
 		}
+		schedulableCount++
+		if inRecordonCooldown(ns.node, opts.RecordonCooldown, now) {
+			// The reaper recently returned this node to service. Re-draining
+			// it now would evict the same pods again and land us back where
+			// we started, so leave it alone until the cooldown expires.
+			log.Printf("Active Nudger: node %q is in re-cordon cooldown after a stale-cordon reap; skipping as a drain candidate", ns.name)
+			continue
+		}
 		candidateNodes = append(candidateNodes, ns)
 	}
 
-	if len(candidateNodes) < 2 {
+	if schedulableCount < 2 {
 		log.Println("Active Nudger: Less than 2 schedulable nodes. Consolidation not possible.")
 		result.NotFeasibleReason = "fewer than 2 schedulable nodes"
+		return result, nil
+	}
+	if len(candidateNodes) == 0 {
+		log.Println("Active Nudger: Every schedulable node is in re-cordon cooldown. Nothing to consolidate this pass.")
+		result.NotFeasibleReason = "all schedulable nodes are in re-cordon cooldown"
 		return result, nil
 	}
 
@@ -337,12 +405,13 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 
 	if !nodeObj.Spec.Unschedulable {
 		log.Printf("Active Nudger: Cordoning node %q...\n", targetNodeToEmpty.name)
-		nodeObj.Spec.Unschedulable = true
-		_, err = clientset.CoreV1().Nodes().Update(ctx, nodeObj, metav1.UpdateOptions{})
-		if err != nil {
-			return result, fmt.Errorf("failed to cordon node %q: %w", targetNodeToEmpty.name, err)
+		// claimCordon writes the ownership annotations and Unschedulable in
+		// one update, so this run cannot leave behind a cordon that no later
+		// run can recognise as its own.
+		if err := claimCordon(ctx, clientset, nodeObj, runID, now); err != nil {
+			return result, err
 		}
-		log.Printf("Active Nudger: Node %q cordoned successfully.\n", targetNodeToEmpty.name)
+		log.Printf("Active Nudger: Node %q cordoned successfully (run %s).\n", targetNodeToEmpty.name, runID)
 	} else {
 		log.Printf("Active Nudger: Node %q is already cordoned.\n", targetNodeToEmpty.name)
 	}
