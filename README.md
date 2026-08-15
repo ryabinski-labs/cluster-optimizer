@@ -70,7 +70,8 @@ Summary:
 - observed_cpu_m: 1820
 - requested_memory_mib: 9472
 - observed_memory_mib: 4060
-- two_node_estimate: map[feasible:true projected_cpu_m:3900 projected_memory_mib:7100]
+- capacity: 4 nodes → 3 minimum safe (1 releasable), evidence historical_p95/prometheus
+    pool-general  4 → 3  fits  binding: must survive losing one node
 
 Findings:
 - [medium] default/api cpu-request-over-provisioned: Lower CPU request toward observed usage.
@@ -121,7 +122,8 @@ remediation allowlist, persistence-backed recurrence checks, and a halt switch.
 | Capability | Shipped behavior | Default mode |
 | --- | --- | --- |
 | Cluster analysis | Reads nodes, pods, workloads, HPAs, PDBs, metrics, DaemonSet overhead, and cluster fit. | Read-only |
-| Cost recommendations | Flags over-requests, under-requests, blocked drains, HPA sensitivity, PDB issues, fixed replica capacity, runtime modernization candidates, and two-node feasibility. | Advisory |
+| Cost recommendations | Flags over-requests, under-requests, blocked drains, HPA sensitivity, PDB issues, fixed replica capacity, and runtime modernization candidates. | Advisory |
+| Minimum safe node count | Per-pool placement simulation finds the fewest nodes each pool can run on, and names the constraint that stops it going lower. | Advisory |
 | Trend history | Stores reports and recommendation occurrence counts in DynamoDB when configured. | Optional |
 | Operations UI | Shows reports, multi-day trends, remediation readiness, engine mode, halt status, and recent remediation activity. | Local UI |
 | Live request trimming | Patches CPU or memory requests on allowlisted Deployments, DaemonSets, and StatefulSets when all safety gates pass. | Off |
@@ -257,6 +259,82 @@ The applier refuses to mutate when any of the following apply:
 - The halt ConfigMap (`cluster-optimizer/cluster-optimizer-halt`, key
   `halt=true`) is set, or its read fails.
 
+### Minimum safe node count
+
+Every run answers, per node pool, *how few nodes could this pool run on?* — by
+simulating placement rather than comparing totals.
+
+For each pool the engine searches upward from one node for the smallest count
+that satisfies every hard scheduling predicate at once: CPU, memory, extended
+resources (GPUs, hugepages), the kubelet's pod cap, taints and tolerations,
+`nodeSelector`, required node affinity, required pod anti-affinity, and
+`DoNotSchedule` topology spread (including `minDomains`). DaemonSet footprints
+are charged to every retained node, since consolidating does not remove them.
+
+Capacity the cluster does not actually have is never counted. A pod that cannot
+be evicted — a bare pod, or a static pod owned by the node — is left out of the
+placement problem but charged against its own host, so a pinned node never
+reads as empty. A node that is cordoned or NotReady is not a placement target
+at all, because the scheduler will not place there; if something unevictable is
+stranded on it the pool still cannot hand it back, and if nothing is, the node
+is reported as releasable. The survive-one-loss check removes the *largest*
+retained node, not the smallest, so a pool held up by a single big node cannot
+pass a test that never asked what happens when that node dies.
+
+Three things shape the answer:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `CLUSTER_OPTIMIZER_NODE_FLOOR` | `2` | Lower bound on the recommendation. It can only make the answer safer — the derived minimum is never reduced to meet it. |
+| `CLUSTER_OPTIMIZER_SURVIVE_NODE_LOSS` | `true` | Requires the recommended count to still place every pod after losing one node. This is the difference between the minimum and the minimum *safe* count. |
+| `CLUSTER_OPTIMIZER_USAGE_PROVIDER` | `auto` | `auto`, `prometheus`, or `instant`. Any other value is reported as unknown and falls back to the live sample. See below. |
+
+The report records which of these applied, so a consumer showing the number
+cannot imply a guarantee the run was never asked to check: `survive_node_loss`
+travels alongside the verdict, and the UI says plainly when the gate was off.
+
+Each pool lands in one of four states, and the fourth matters most:
+
+- **fits** — the pool can give nodes back.
+- **at minimum** — the workload genuinely needs every node.
+- **at floor** — the workload would fit smaller; your floor stops it.
+- **indeterminate** — a pod carries a required constraint the simulator cannot
+  evaluate (a PersistentVolumeClaim that may pin it to a node, a device-plugin
+  resource, RuntimeClass overhead, required pod *affinity*). The pool makes no
+  claim at all, and enforcement is blocked for it.
+
+That last state is deliberate. The simulator is a first-fit-decreasing pass
+over a constraint filter, not a second kube-scheduler, and it will sometimes be
+pessimistic — a packing it cannot find costs you a missed saving. What it must
+never be is optimistic, because a wrong "yes" costs an outage. So anything it
+cannot model escalates to *unknown*, and unknown blocks.
+
+#### Usage evidence
+
+Pod footprints are sized by the **more demanding** of the request and observed
+p95 usage plus headroom, so an under-requesting pod is modelled at its real
+appetite rather than its optimistic reservation.
+
+Every verdict carries the class of evidence behind it, and only evidence that
+spans time can authorise removing capacity:
+
+| Fidelity | Source | Can enforce? |
+|---|---|---|
+| `historical_p95` | `quantile_over_time` against Prometheus | yes |
+| `instant` | one live `metrics.k8s.io` sample | **no** |
+| `none` | nothing available | no |
+
+Set `CLUSTER_OPTIMIZER_PROMETHEUS_URL` (and optionally
+`CLUSTER_OPTIMIZER_USAGE_LOOKBACK`, default `168h`) to get percentile evidence.
+Without it the engine still reports a verdict — clearly marked advisory —
+because a single sample cannot tell an idle workload from one caught between
+bursts. A Prometheus that answers for fewer than 80% of pods is rejected as
+cluster-wide evidence and the run falls back with the reason recorded.
+
+Asking for `prometheus` explicitly and not getting it returns *no* data rather
+than quietly substituting a live sample: the weaker number looks identical
+downstream, which is exactly why the substitution would be dangerous.
+
 ### Halt switch
 
 Stop the applier, the nudger, and the completed-pod GC from making any further
@@ -277,6 +355,37 @@ could be emptied next. It is dry-run by default; set
 `CLUSTER_OPTIMIZER_NUDGE_LIVE=true` to actually cordon the selected node and
 evict relocatable pods. It checks the halt switch and aborts when any candidate
 eviction is blocked by a PDB with `DisruptionsAllowed=0`.
+
+#### Cordon ownership and the stale-cordon reaper
+
+Every cordon the nudger places is stamped, in the same API write, with
+annotations recording when it happened, which run did it, and whether the node
+was already unschedulable beforehand:
+
+| Annotation | Meaning |
+|---|---|
+| `cluster-optimizer.io/cordoned-at` | RFC3339 time of the cordon |
+| `cluster-optimizer.io/cordoned-by-run` | ID of the run that placed it |
+| `cluster-optimizer.io/prior-unschedulable` | `Spec.Unschedulable` before the cordon |
+| `cluster-optimizer.io/cordon-reaped-at` | Set when the reaper reversed a cordon |
+
+A cordon is only ever a means to an end: the node is drained so an autoscaler
+or an operator can remove it. If nothing removes the node, the cordon is not
+work in progress — it is lost scheduling capacity that nothing will ever notice.
+The same is true if the CronJob pod dies between cordoning and evicting.
+
+So at the start of every pass, before considering any new target, the nudger
+reverses cordons **it placed** that have stood longer than
+`CLUSTER_OPTIMIZER_CORDON_TTL` (default `30m`; set `0` to disable reaping). It
+restores the node's pre-cordon schedulability, clears its own annotations, and
+writes an `uncordon_stale` row to the remediation audit log. A node the reaper
+just returned to service is excluded from being drained again for two hours, so
+reaping cannot become a cordon/evict/uncordon loop — it stays a valid
+destination for pods throughout.
+
+Cordons without these annotations are never touched: an unannotated cordon is
+an operator's deliberate act. A run of `uncordon_stale` rows in the UI is the
+signal that drained nodes are not actually being removed.
 
 ### Completed-pod cleanup
 
@@ -407,10 +516,11 @@ Deploy the DynamoDB-enabled CronJob example:
 kubectl apply -f examples/cronjob-dynamodb.yaml
 ```
 
-That example is configured for the full remediation engine (`--auto-apply` and
-`--nudge` plus their live environment gates). For history-only advisory runs,
-start from `manifests/cronjob.yaml`, add only `DYNAMODB_TABLE` and AWS
-credentials, and leave the live gates commented out.
+That example runs the full analysis engine in advisory mode. It records
+auto-apply, consolidation, and completed-pod cleanup recommendations, but all
+three live environment gates are disabled so scheduled runs cannot mutate the
+cluster. Enable a live gate only for a deliberate, monitored remediation
+window with a tested rollback.
 
 Without `DYNAMODB_TABLE`, the optimizer writes the report to stdout only.
 With `DYNAMODB_TABLE`, it writes the same report to DynamoDB after printing it.

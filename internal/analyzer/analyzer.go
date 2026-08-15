@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GipsyChef/cluster-optimizer/internal/capacity"
 	"github.com/GipsyChef/cluster-optimizer/internal/classifier"
 	"github.com/GipsyChef/cluster-optimizer/internal/model"
 	"github.com/GipsyChef/cluster-optimizer/internal/quantity"
@@ -52,6 +53,24 @@ func Analyze(snapshot model.Snapshot) Report {
 // supplied Classifier. If classifier is nil, findings are returned untagged
 // (preserving prior behaviour for tests and callers that haven't migrated).
 func AnalyzeWith(snapshot model.Snapshot, c *classifier.Classifier) Report {
+	return AnalyzeWithOptions(snapshot, Options{Classifier: c})
+}
+
+// Options carries everything the analyzer needs beyond the snapshot itself.
+type Options struct {
+	// Classifier tags findings as provider-managed / remediable.
+	Classifier *classifier.Classifier
+	// Capacity is the per-pool minimum-safe-node analysis. It is computed
+	// outside the analyzer because it depends on a usage source the analyzer
+	// has no business reaching for. When nil the summary reports the
+	// cluster's shape without claiming a minimum — which is the honest
+	// output for a run that could not gather the evidence.
+	Capacity *capacity.Result
+}
+
+// AnalyzeWithOptions runs the rule pipelines with full configuration.
+func AnalyzeWithOptions(snapshot model.Snapshot, opts Options) Report {
+	c := opts.Classifier
 	findings := append([]Finding{}, analyzePDBs(snapshot.Workloads, snapshot.PDBs)...)
 	findings = append(findings, analyzeHPAs(snapshot.Workloads, snapshot.HPAs)...)
 	findings = append(findings, analyzeHPASensitivity(snapshot.Workloads, snapshot.HPAs)...)
@@ -74,12 +93,12 @@ func AnalyzeWith(snapshot model.Snapshot, c *classifier.Classifier) Report {
 	return Report{
 		ClusterID:   snapshot.ClusterID,
 		GeneratedAt: time.Now().UTC(),
-		Summary:     summary(snapshot),
+		Summary:     summary(snapshot, opts.Capacity),
 		Findings:    findings,
 	}
 }
 
-func summary(snapshot model.Snapshot) map[string]interface{} {
+func summary(snapshot model.Snapshot, cap *capacity.Result) map[string]interface{} {
 	var allocCPU, allocMem, reqCPU, reqMem, usageCPU, usageMem, dsCPU, dsMem int64
 	var sawUsageCPU, sawUsageMem bool
 	activePods := 0
@@ -116,7 +135,7 @@ func summary(snapshot model.Snapshot) map[string]interface{} {
 		types = append(types, instanceType)
 	}
 	sort.Strings(types)
-	return map[string]interface{}{
+	out := map[string]interface{}{
 		"node_count":                     len(snapshot.Nodes),
 		"instance_types":                 types,
 		"active_pods":                    activePods,
@@ -128,43 +147,14 @@ func summary(snapshot model.Snapshot) map[string]interface{} {
 		"observed_memory_mib":            optionalMetric(usageMem, sawUsageMem),
 		"daemonset_requested_cpu_m":      dsCPU,
 		"daemonset_requested_memory_mib": dsMem,
-		"two_node_estimate":              twoNodeEstimate(snapshot, reqCPU, reqMem, dsCPU, dsMem),
 	}
-}
-
-func twoNodeEstimate(snapshot model.Snapshot, reqCPU, reqMem, dsCPU, dsMem int64) map[string]interface{} {
-	nodeCount := int64(len(snapshot.Nodes))
-	if nodeCount < 2 {
-		return map[string]interface{}{"feasible": false, "reason": "cluster has fewer than two nodes"}
+	// The capacity verdict replaces the former "two_node_estimate", which
+	// measured requests against twice a cluster-average node and therefore
+	// reported the same target for every cluster it ever ran on.
+	if cap != nil {
+		out["capacity"] = cap
 	}
-	var allocCPU, allocMem int64
-	for _, node := range snapshot.Nodes {
-		allocCPU += node.AllocatableCPUm
-		allocMem += node.AllocatableMemoryMiB
-	}
-	avgCPU := allocCPU / nodeCount
-	avgMem := allocMem / nodeCount
-	avgDSCPU := dsCPU / nodeCount
-	avgDSMem := dsMem / nodeCount
-	projectedCPU := reqCPU - max(nodeCount-2, 0)*avgDSCPU
-	projectedMem := reqMem - max(nodeCount-2, 0)*avgDSMem
-	targetCPU := 2 * avgCPU
-	targetMem := 2 * avgMem
-	minCPUHeadroom := max(250, targetCPU/10)
-	minMemHeadroom := max(512, targetMem/10)
-	cpuHeadroom := targetCPU - projectedCPU
-	memHeadroom := targetMem - projectedMem
-	return map[string]interface{}{
-		"feasible":                       cpuHeadroom >= minCPUHeadroom && memHeadroom >= minMemHeadroom,
-		"projected_requested_cpu_m":      projectedCPU,
-		"projected_requested_memory_mib": projectedMem,
-		"target_allocatable_cpu_m":       targetCPU,
-		"target_allocatable_memory_mib":  targetMem,
-		"cpu_headroom_m":                 cpuHeadroom,
-		"memory_headroom_mib":            memHeadroom,
-		"minimum_cpu_headroom_m":         minCPUHeadroom,
-		"minimum_memory_headroom_mib":    minMemHeadroom,
-	}
+	return out
 }
 
 func analyzeUsage(workloads []model.Workload, hpas []model.HPA) []Finding {

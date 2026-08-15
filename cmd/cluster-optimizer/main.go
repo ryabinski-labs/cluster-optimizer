@@ -6,17 +6,20 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 
 	"github.com/GipsyChef/cluster-optimizer/internal/analyzer"
 	"github.com/GipsyChef/cluster-optimizer/internal/applier"
+	"github.com/GipsyChef/cluster-optimizer/internal/capacity"
 	"github.com/GipsyChef/cluster-optimizer/internal/classifier"
 	"github.com/GipsyChef/cluster-optimizer/internal/collector"
 	"github.com/GipsyChef/cluster-optimizer/internal/nudger"
 	"github.com/GipsyChef/cluster-optimizer/internal/plan"
 	"github.com/GipsyChef/cluster-optimizer/internal/podgc"
 	"github.com/GipsyChef/cluster-optimizer/internal/store"
+	"github.com/GipsyChef/cluster-optimizer/internal/usage"
 )
 
 func main() {
@@ -37,6 +40,12 @@ func run(ctx context.Context, args []string) error {
 	var gcNamespace string
 	var gcMinAge time.Duration
 	var gcMaxDeletions int
+	var cordonTTL time.Duration
+	var nodeFloor int
+	var surviveNodeLoss bool
+	var usageProvider string
+	var prometheusURL string
+	var usageLookback time.Duration
 	flags := flag.NewFlagSet("cluster-optimizer", flag.ContinueOnError)
 	flags.StringVar(&clusterID, "cluster-id", envOr("CLUSTER_OPTIMIZER_CLUSTER_ID", "default"), "stable cluster identifier")
 	flags.StringVar(&output, "output", envOr("OUTPUT_FORMAT", "json"), "json or text")
@@ -48,6 +57,12 @@ func run(ctx context.Context, args []string) error {
 	flags.StringVar(&gcNamespace, "gc-namespace", envOr("CLUSTER_OPTIMIZER_GC_NAMESPACE", ""), "limit completed-pod cleanup to one namespace (default: all namespaces)")
 	flags.DurationVar(&gcMinAge, "gc-min-age", envDurationOr("CLUSTER_OPTIMIZER_GC_MIN_AGE", 0), "only delete completed pods that finished at least this long ago (e.g. 1h)")
 	flags.IntVar(&gcMaxDeletions, "gc-max-deletions", envIntOr("CLUSTER_OPTIMIZER_GC_MAX_DELETIONS", 0), "cap completed-pod deletions per run, oldest first (0 = no cap)")
+	flags.DurationVar(&cordonTTL, "cordon-ttl", envDurationOr("CLUSTER_OPTIMIZER_CORDON_TTL", nudger.DefaultCordonTTL), "reverse a cordon this tool placed once it has stood this long with nothing acting on it (0 = never reap)")
+	flags.IntVar(&nodeFloor, "node-floor", envIntOr("CLUSTER_OPTIMIZER_NODE_FLOOR", capacity.DefaultFloor), "smallest node count per pool the minimum-safe-node search may recommend")
+	flags.BoolVar(&surviveNodeLoss, "survive-node-loss", envBoolOr("CLUSTER_OPTIMIZER_SURVIVE_NODE_LOSS", true), "require that the recommended node count still places every pod after losing one node")
+	flags.StringVar(&usageProvider, "usage-provider", envOr("CLUSTER_OPTIMIZER_USAGE_PROVIDER", "auto"), "usage evidence source: auto, prometheus, or instant")
+	flags.StringVar(&prometheusURL, "prometheus-url", envOr("CLUSTER_OPTIMIZER_PROMETHEUS_URL", ""), "base URL of a Prometheus-compatible API, e.g. http://prometheus.monitoring:9090")
+	flags.DurationVar(&usageLookback, "usage-lookback", envDurationOr("CLUSTER_OPTIMIZER_USAGE_LOOKBACK", usage.DefaultLookback), "window for percentile usage queries (e.g. 168h for one week)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -67,7 +82,27 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	report := analyzer.AnalyzeWith(snapshot, cls)
+	// Usage evidence is resolved before analysis so the capacity search sizes
+	// each pod by the more demanding of its request and its observed p95.
+	// Resolve never fails: it degrades to a weaker source and records why, so
+	// a cluster with no Prometheus still gets a report — one that is simply
+	// marked non-actionable rather than silently treated as trustworthy.
+	usageSet := usage.Resolve(ctx, usage.Config{
+		Mode:          usageProvider,
+		PrometheusURL: prometheusURL,
+		Lookback:      usageLookback,
+		PodKeys:       usage.PodKeys(snapshot.Pods),
+	}, usage.InstantFromPods(snapshot.Pods))
+
+	capacityResult := capacity.Analyze(snapshot, usageSet, capacity.Config{
+		Floor:           nodeFloor,
+		SurviveNodeLoss: surviveNodeLoss,
+	})
+
+	report := analyzer.AnalyzeWithOptions(snapshot, analyzer.Options{
+		Classifier: cls,
+		Capacity:   &capacityResult,
+	})
 
 	var occurrences map[string]int64
 	var writer *store.DynamoDBWriter
@@ -154,6 +189,7 @@ func run(ctx context.Context, args []string) error {
 		}
 		nudgeOpts := nudger.NewOptions()
 		nudgeOpts.Live = nudgeLive
+		nudgeOpts.CordonTTL = cordonTTL
 		nudgeResult, err := nudger.NudgePodsWithResult(ctx, clientset, nudgeOpts)
 		if err != nil {
 			return fmt.Errorf("active nudging failed: %w", err)
@@ -161,6 +197,16 @@ func run(ctx context.Context, args []string) error {
 		status.HaltActive = status.HaltActive || nudgeResult.Halted
 		if nudgeResult.HaltReason != "" {
 			status.HaltReason = nudgeResult.HaltReason
+		}
+		for _, event := range cordonReapEvents(nudgeResult, status.LastRunAt) {
+			events = append(events, event)
+			status.LastRunActions++
+			if event.Applied {
+				status.LastRunApplied++
+			}
+			if event.Error != "" {
+				status.LastRunErrors++
+			}
 		}
 		if event, ok := nudgerEvent(nudgeResult, status.LastRunAt); ok {
 			events = append(events, event)
@@ -310,6 +356,38 @@ func nudgerEvent(result nudger.Result, ts time.Time) (store.RemediationEvent, bo
 	return event, true
 }
 
+// cordonReapEvents turns the stale-cordon pass into audit rows — one per node
+// whose cordon was reversed, plus one per failure.
+//
+// These get their own rows rather than folding into the consolidation event
+// because they describe the opposite kind of act: the nudger removes capacity,
+// the reaper gives it back. An operator scanning the feed for "why did this
+// node come back" should find that answer stated plainly, and a run of these
+// rows is the signal that drained nodes are never actually being removed.
+func cordonReapEvents(result nudger.Result, ts time.Time) []store.RemediationEvent {
+	var events []store.RemediationEvent
+	for _, node := range result.Reap.Uncordoned {
+		events = append(events, store.RemediationEvent{
+			Timestamp:  ts,
+			Mode:       result.Mode,
+			Kind:       "uncordon_stale",
+			TargetNode: node,
+			Applied:    result.Mode == "live",
+			Reason:     "cordon outlived its TTL with nothing acting on it; node returned to service",
+		})
+	}
+	for _, msg := range result.Reap.Errors {
+		events = append(events, store.RemediationEvent{
+			Timestamp: ts,
+			Mode:      result.Mode,
+			Kind:      "uncordon_stale",
+			Applied:   false,
+			Error:     msg,
+		})
+	}
+	return events
+}
+
 // podGCEvent collapses one completed-pod cleanup pass into a single audit row.
 // ok=false covers the "engine ran but found nothing and wasn't halted" case so
 // we don't flood the feed with empty rows on every CronJob tick.
@@ -379,14 +457,65 @@ func envDurationOr(key string, fallback time.Duration) time.Duration {
 
 func renderText(report analyzer.Report) string {
 	out := fmt.Sprintf("Cluster: %s\nGenerated: %s\n\nSummary:\n", report.ClusterID, report.GeneratedAt.Format(time.RFC3339))
-	for key, value := range report.Summary {
-		out += fmt.Sprintf("- %s: %v\n", key, value)
+	// Summary keys are printed in a stable order so successive runs diff
+	// cleanly; Go's map iteration would otherwise shuffle them every time.
+	keys := make([]string, 0, len(report.Summary))
+	for key := range report.Summary {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if key == "capacity" {
+			out += renderCapacity(report.Summary[key])
+			continue
+		}
+		out += fmt.Sprintf("- %s: %v\n", key, report.Summary[key])
 	}
 	out += "\nFindings:\n"
 	if len(report.Findings) == 0 {
 		return out + "- No findings.\n"
 	}
-	for _, finding := range report.Findings {
+	return out + renderFindings(report.Findings)
+}
+
+// renderCapacity prints the minimum-safe-node verdict as a compact block
+// rather than dumping the struct: the per-pool rows and their binding
+// constraints are the part an operator acts on.
+func renderCapacity(value any) string {
+	result, ok := value.(*capacity.Result)
+	if !ok {
+		return fmt.Sprintf("- capacity: %v\n", value)
+	}
+	out := fmt.Sprintf("- capacity: %d nodes → %d minimum safe (%d releasable), evidence %s/%s\n",
+		result.CurrentNodes, result.MinimumSafeNodes, result.RemovableNodes,
+		result.UsageFidelity, orDash(result.UsageSource))
+	if !result.Actionable {
+		out += "    advisory only — not every pool has evidence strong enough to act on\n"
+	}
+	if result.UsageNote != "" {
+		out += fmt.Sprintf("    note: %s\n", result.UsageNote)
+	}
+	for _, pool := range result.Pools {
+		target := "—"
+		if pool.Status != capacity.StatusIndeterminate {
+			target = fmt.Sprintf("%d", pool.MinimumSafeNodes)
+		}
+		out += fmt.Sprintf("    %-24s %d → %-3s %-14s binding: %s\n",
+			pool.Pool, pool.CurrentNodes, target, pool.Status, orDash(pool.BindingConstraint))
+	}
+	return out
+}
+
+func orDash(value string) string {
+	if value == "" {
+		return "—"
+	}
+	return value
+}
+
+func renderFindings(findings []analyzer.Finding) string {
+	var out string
+	for _, finding := range findings {
 		scope := finding.Workload
 		if finding.Namespace != "" && scope != "" {
 			scope = finding.Namespace + "/" + scope

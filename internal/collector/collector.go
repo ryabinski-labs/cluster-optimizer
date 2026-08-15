@@ -115,6 +115,14 @@ func collectNodes(ctx context.Context, clientset *kubernetes.Clientset) ([]model
 			AllocatableCPUm:      cpu,
 			AllocatableMemoryMiB: mem,
 			DiskPressure:         hasDiskPressure(node),
+			Labels:               node.Labels,
+			Taints:               nodeTaints(node),
+			Pool:                 nodePool(node),
+			Zone:                 nodeZone(node),
+			Unschedulable:        node.Spec.Unschedulable,
+			Ready:                nodeReady(node),
+			AllocatableExtended:  extendedAllocatable(node.Status.Allocatable),
+			MaxPods:              node.Status.Allocatable.Pods().Value(),
 		}
 		// Disk usage comes from the kubelet stats/summary endpoint, proxied
 		// through the API server. It is best-effort: a node whose kubelet is
@@ -210,6 +218,13 @@ func podModel(pod corev1.Pod, usage resourceUsage) model.Pod {
 		images = append(images, container.Image)
 	}
 	ownerKind, ownerName := firstOwner(pod.OwnerReferences)
+	// A mirror pod is the kubelet's, not a controller's, however its owner
+	// references read. Recording that here keeps Pod.Relocatable() honest
+	// without every caller having to re-check the annotation.
+	if mirrorPod(pod) {
+		ownerKind = "Node"
+	}
+	extended := extendedRequests(pod.Spec)
 	return model.Pod{
 		Namespace:         pod.Namespace,
 		Name:              pod.Name,
@@ -225,6 +240,13 @@ func podModel(pod corev1.Pod, usage resourceUsage) model.Pod {
 		LimitsMemoryMiB:   limMem,
 		UsageCPUm:         usage.cpu,
 		UsageMemoryMiB:    usage.memory,
+		NodeSelector:      pod.Spec.NodeSelector,
+		Tolerations:       podTolerations(pod.Spec),
+		Affinity:          podAffinity(pod.Spec),
+		TopologySpread:    podTopologySpread(pod.Spec),
+		PriorityClass:     normalizePriorityClass(pod.Spec.PriorityClassName),
+		RequestsExtended:  extended,
+		Unmodelled:        unmodelledConstraints(pod, extended),
 	}
 }
 

@@ -29,6 +29,23 @@ mutation requires two independent gates AND a halt-ConfigMap check.
   HPAs, PDBs, and metrics.
 - Analyzer (`internal/analyzer`): produces findings with evidence and pillar
   trade-offs.
+- Usage providers (`internal/usage`): resolve observed pod usage from the
+  strongest available source (Prometheus percentile query, else the live
+  metrics-server sample) and stamp every reading with its fidelity. Only
+  fidelities that span time are `Actionable()`; the resolver also rejects a
+  source covering under 80% of pods and records why it downgraded.
+- Placement simulator (`internal/binpack`): first-fit-decreasing packing over
+  a hard-predicate filter (resources, extended resources, pod cap, taints,
+  nodeSelector, required node affinity, required pod anti-affinity,
+  DoNotSchedule topology spread). Soft/preferred terms are deliberately
+  ignored — they change which node wins, never whether placement is possible.
+  Any required constraint it cannot evaluate returns `Indeterminate`, which is
+  never `Feasible()`.
+- Capacity engine (`internal/capacity`): searches per node pool for the
+  smallest N whose placement simulates, optionally requiring N−1 to still
+  place (survive-one-node-loss), and reports the binding constraint. Replaces
+  the former `twoNodeEstimate`, which compared requests against twice a
+  cluster-average node and so returned the same target for every cluster.
 - Classifier (`internal/classifier`): tags each finding with
   `provider_managed` (DOKS-controlled DaemonSets and system namespaces) and
   `remediable` (a target in `config/remediation-targets.json` supports the
@@ -45,7 +62,10 @@ mutation requires two independent gates AND a halt-ConfigMap check.
 - Nudger (`internal/nudger`): cordons + evicts to consolidate onto fewer
   nodes. Dry-run by default; live mode requires `CLUSTER_OPTIMIZER_NUDGE`
   and `CLUSTER_OPTIMIZER_NUDGE_LIVE`. Respects the same halt switch and
-  pre-flights PDBs.
+  pre-flights PDBs. Every cordon is stamped with ownership annotations in
+  the same API write that sets `Unschedulable`, so no cordon this tool
+  places can become unattributable; a reaper reverses its own cordons once
+  they outlive `CLUSTER_OPTIMIZER_CORDON_TTL`.
 - PR-gated remediator (`cmd/api-yml-remediator`): patches workload
   manifests in user-owned application repositories. Now supports
   Deployment, DaemonSet, and StatefulSet kinds, and refuses any name in
@@ -83,9 +103,21 @@ mutation requires two independent gates AND a halt-ConfigMap check.
 |---|---|---|
 | Live trim causes OOMKill or throttling under burst | High | Live applier requires `confidence=high` + ≥3-run agreement + DynamoDB persistence + 50% max-trim cap per pass + 10m/32Mi floor + 1-workload-per-tick budget; dry-run is default |
 | Operator mistakenly patches a DOKS-managed resource | High | Hardcoded provider-managed namespace + workload-name list in classifier; planner refuses to emit actions for them; PR remediator also refuses |
-| One short metrics sample can mislead sizing | High | Mark confidence, recommend multi-day p95/p99 validation |
+| One short metrics sample can mislead sizing | High | Mark confidence, recommend multi-day p95/p99 validation; the capacity engine additionally refuses to mark any verdict actionable unless the usage fidelity spans time (`historical_p95`, `recommender`, `sampled_rollup`) |
+| Placement simulator disagrees with the real scheduler and a "removable" node is not | High | Only hard predicates are modelled and only in the pessimistic direction: soft terms are ignored (they cannot block), unmodelled required constraints force the pool to `indeterminate`, and FFD's suboptimality can only under-report what fits. Enforcement additionally verifies each drain rather than trusting the projection |
+| Cluster-average capacity math misdescribes heterogeneous pools | Medium | Capacity is evaluated per node pool, keyed off provider pool labels with an instance-type fallback |
+| An unevictable pod's footprint is invisible, so the simulator packs into space that is already taken | High | Bare and mirror pods are excluded from the placement problem but charged as reserved capacity on their specific host node, sized by the same request-vs-observed rule as movable pods |
+| A cordoned or NotReady node is counted as capacity that can absorb a drained workload | High | Only `model.Node.Schedulable()` nodes are placement targets; an unusable node that strands an immovable pod is still counted in the pool minimum, and one that strands nothing is reported as releasable |
+| "Survive one node loss" is verified against the loss that proves least | High | The gate re-simulates without the *largest* retained node rather than dropping the last entry of a largest-first list, so a pool held up by one big node cannot pass |
+| A consumer presents the node count as carrying a safety guarantee the run never checked | Medium | `survive_node_loss` travels in the result JSON and the UI states plainly when the gate did not run |
+| A topology-spread `minDomains` is collected but not evaluated, understating skew | Medium | `minDomains` is enforced: when fewer eligible domains exist than it demands, the global minimum is treated as zero, exactly as the scheduler does |
+| An empty required node-affinity term reads as "no constraint" | Low | An empty or null `NodeSelectorTerm` matches no node, per the API contract, so the pod is reported unplaceable rather than placeable anywhere |
 | Operator forgets the kill switch exists | Medium | Documented in README + runbook; applier logs reference the halt ConfigMap path on every run |
 | Nudger cordons a node that would violate a PDB | Medium | Pre-flight: lists matching PDBs and aborts if `DisruptionsAllowed=0`; PDB list errors are also treated as blockers |
+| Run dies between cordon and evict, stranding a node unschedulable forever | High | Ownership annotations are written in the same API update as the cordon, so every cordon is attributable; the next run reaps any of ours older than `CLUSTER_OPTIMIZER_CORDON_TTL` and restores the pre-cordon state |
+| Drain succeeds but nothing removes the node, so the cordon becomes permanent lost capacity | Medium | Same reaper: a cordon with no follow-through is treated as abandoned, not as work in progress, and each reversal writes an `uncordon_stale` audit row so the pattern is visible |
+| Reaper and nudger oscillate on the same node, re-evicting pods every cycle | Medium | A reaped node is barred from being drained again for `DefaultRecordonCooldown` (2h) while remaining a valid destination for pods |
+| Reaper reverses a cordon an operator placed deliberately | Medium | Only cordons carrying `cluster-optimizer.io/cordoned-at` are eligible; `prior-unschedulable` preserves a pre-existing cordon underneath ours |
 | RBAC drift adds patch verbs to wrong role | Medium | Applier RBAC split into separate `rbac-applier.yaml`; base `rbac.yaml` has read/list/watch plus node-update and pods/eviction for nudging only |
 | Provider-specific node pricing is absent | Medium | Keep cost effect qualitative until provider adapters ship |
 | PDB percentage/matchExpression edge cases | Medium | Support percentages now; add matchExpression support next |
