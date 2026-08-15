@@ -244,6 +244,12 @@ actually lower workload requests in-cluster you must:
 Both the env var and the flag must be present. Either alone keeps the
 applier in dry-run mode.
 
+The shipped manifests keep `CLUSTER_OPTIMIZER_AUTOAPPLY` and
+`CLUSTER_OPTIMIZER_NUDGE_LIVE` at `"false"` so that applying them directly is
+always advisory. If you deploy through the `Deploy Kubernetes` workflow, set
+the gates with its `enable_live_apply` / `enable_live_nudge` inputs instead of
+editing the manifests — see [docs/runbook.md](docs/runbook.md#go-live-or-back-to-dry-run-via-the-deploy-workflow).
+
 The applier refuses to mutate when any of the following apply:
 - The workload is provider-managed (DOKS DaemonSets such as `kube-proxy`,
   `cilium`, `csi-do-node`, `do-node-agent`, `coredns`, `metrics-server`,

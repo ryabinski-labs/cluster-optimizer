@@ -179,9 +179,30 @@ Look for:
 - `Applier: halt configmap set (...), refusing to apply` confirms halt is active.
 - `Active Nudger (DRY-RUN/LIVE):` describes consolidation plans.
 
+## Go live (or back to dry-run) via the deploy workflow
+
+The committed manifests always ship with the live gates set to `"false"`, so
+a plain `kubectl apply -f` is advisory no matter which manifest is used.
+Turning a gate on is a deploy-time decision, made through `Deploy Kubernetes`
+(`workflow_dispatch`):
+
+| Input | Effect when `true` |
+|---|---|
+| `enable_live_apply` | Sets `CLUSTER_OPTIMIZER_AUTOAPPLY=true`. Requires `enable_dynamodb=true` — the workflow fails fast otherwise, because the applier cannot establish the 3-consecutive-run history without persistence. |
+| `enable_live_nudge` | Sets `CLUSTER_OPTIMIZER_NUDGE_LIVE=true`, allowing the nudger to cordon a node and evict its relocatable pods. |
+
+Both default to `false`, so a re-deploy that does not set them explicitly
+returns the cluster to dry-run. The `Show deployment` step prints the gate
+values it actually deployed. The `--auto-apply` / `--nudge` args and the halt
+ConfigMap are unaffected by these inputs; the halt switch still overrides both.
+
+`CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE` has no workflow input yet — it is
+still enabled by editing the manifest or patching the CronJob directly.
+
 ## Return to dry-run mode
 
-To roll back from live to advisory without removing anything:
+Fastest rollback is a re-deploy with both inputs `false`. To flip the running
+CronJob immediately without waiting on a workflow run:
 
 ```bash
 # Remove either gate; both must be true to mutate.
