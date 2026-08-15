@@ -33,6 +33,20 @@ on:
         default: 7dc99f7c-e0b7-4402-81ae-0e9a1fedcd82
         required: true
         type: string
+      enable_live_apply:
+        description: >-
+          Live applier: patch workload requests in-cluster. Off by default.
+          Requires DynamoDB persistence and manifests/rbac-applier.yaml.
+        default: false
+        required: true
+        type: boolean
+      enable_live_nudge:
+        description: >-
+          Live nudger: cordon a node and evict its relocatable pods when
+          consolidation is feasible. Off by default.
+        default: false
+        required: true
+        type: boolean
 
 permissions:
   contents: read
@@ -129,20 +143,48 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           CLUSTER_ID: ${{ inputs.cluster_id }}
           DYNAMODB_TABLE: ${{ inputs.dynamodb_table }}
+          ENABLE_LIVE_APPLY: ${{ inputs.enable_live_apply }}
+          ENABLE_LIVE_NUDGE: ${{ inputs.enable_live_nudge }}
         run: |
           manifest="manifests/cronjob.yaml"
           if [ "${ENABLE_DYNAMODB}" = "true" ]; then
             manifest="examples/cronjob-dynamodb.yaml"
           fi
 
+          # The applier refuses to mutate without DynamoDB persistence: it
+          # requires a finding to recur across 3 consecutive runs, which it
+          # cannot establish from a single stdout-only run.
+          if [ "${ENABLE_LIVE_APPLY}" = "true" ] && [ "${ENABLE_DYNAMODB}" != "true" ]; then
+            echo "enable_live_apply requires enable_dynamodb; the applier has no run history without it."
+            exit 1
+          fi
+
+          # The manifests ship with every live gate set to "false" so that a
+          # plain `kubectl apply -f` is always advisory. Turning one on is a
+          # deploy-time decision, not a change to the committed manifest.
+          gate() {
+            if [ "$2" = "true" ]; then
+              sed "/name: $1\$/{n;s/value: \"false\"/value: \"true\"/;}"
+            else
+              cat
+            fi
+          }
+
           kubectl patch --local -f "${manifest}" --type=json \
             -p "[{\"op\":\"replace\",\"path\":\"/spec/jobTemplate/spec/template/spec/containers/0/image\",\"value\":\"${IMAGE_NAME}:${IMAGE_TAG}\"}]" \
             -o yaml |
             sed "s/value: \"default\"/value: \"${CLUSTER_ID}\"/" |
             sed "s/value: cluster-optimizer-reports/value: ${DYNAMODB_TABLE}/" |
+            gate CLUSTER_OPTIMIZER_AUTOAPPLY "${ENABLE_LIVE_APPLY}" |
+            gate CLUSTER_OPTIMIZER_NUDGE_LIVE "${ENABLE_LIVE_NUDGE}" |
             kubectl apply -f -
 
       - name: Show deployment
         run: |
           kubectl get cronjob -n cluster-optimizer cluster-optimizer
           kubectl get serviceaccount -n cluster-optimizer cluster-optimizer
+
+          echo "Live gates as deployed:"
+          kubectl get cronjob -n cluster-optimizer cluster-optimizer \
+            -o jsonpath='{range .spec.jobTemplate.spec.template.spec.containers[0].env[?(@.value)]}{.name}={.value}{"\n"}{end}' |
+            grep -E 'AUTOAPPLY|NUDGE_LIVE|GC_COMPLETED_PODS_LIVE' || true
