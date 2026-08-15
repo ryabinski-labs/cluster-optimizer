@@ -12,6 +12,12 @@ also creates a one-off Job from the CronJob and waits for it to complete.
 The script also verifies that the live CronJob matches the rendered repo
 manifest, using the same inputs as the deploy workflow.
 
+The remediation-mode report reads the CronJob, so it describes the next run.
+It closes with the posture the most recent run actually used, since a CronJob
+update only reaches Jobs created after it — until the next tick the last run's
+logs still show the previous posture. --run-job creates a run that uses the
+current one immediately (on a live cluster, that run mutates workloads).
+
 Environment overrides:
   GITHUB_REF     Git ref used to resolve the latest published image. Default: main
   NAMESPACE      Kubernetes namespace. Default: cluster-optimizer
@@ -195,15 +201,81 @@ verify_targets_config_sync() {
   echo "Targets config sync: YES - the live ConfigMap matches ${TARGETS_FILE}."
 }
 
-cronjob_arg_present() {
-  kubectl get cronjob "${CRONJOB}" -n "${NAMESPACE}" \
-    -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].args[*]}' 2>/dev/null |
-    tr ' ' '\n' | grep -qx -- "$1"
+# The remediation gates live on the pod template's single container, which
+# sits at a different path on a CronJob than on the Jobs it creates. Reading
+# both through the same helpers is what lets the posture the CronJob will use
+# next be compared against the posture the last run actually used.
+CRONJOB_CONTAINER='.spec.jobTemplate.spec.template.spec.containers[0]'
+JOB_CONTAINER='.spec.template.spec.containers[0]'
+
+container_arg_present() {
+  local resource="$1" path="$2" arg="$3"
+  local args
+
+  # Padded so the glob below matches whole arguments only, and compared with
+  # case rather than a grep pipeline: under `set -o pipefail` a `grep -q` that
+  # exits on its first match can leave the pipeline reporting the SIGPIPE of
+  # an upstream stage, which would read as "argument absent".
+  args=" $(kubectl get "${resource}" -n "${NAMESPACE}" -o "jsonpath={${path}.args[*]}" 2>/dev/null) "
+  case "${args}" in
+    *" ${arg} "*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
-cronjob_env_value() {
-  kubectl get cronjob "${CRONJOB}" -n "${NAMESPACE}" \
-    -o "jsonpath={.spec.jobTemplate.spec.template.spec.containers[0].env[?(@.name=='$1')].value}" 2>/dev/null
+container_env_value() {
+  local resource="$1" path="$2" name="$3"
+  kubectl get "${resource}" -n "${NAMESPACE}" \
+    -o "jsonpath={${path}.env[?(@.name=='${name}')].value}" 2>/dev/null
+}
+
+# gate_state echoes a container spec's four remediation gate inputs as
+# "apply_flag apply_env nudge_flag nudge_env", each "true" or "false".
+gate_state() {
+  local resource="$1" path="$2"
+  local apply_flag=false apply_env=false nudge_flag=false nudge_env=false
+
+  if container_arg_present "${resource}" "${path}" --auto-apply; then apply_flag=true; fi
+  if [ "$(container_env_value "${resource}" "${path}" CLUSTER_OPTIMIZER_AUTOAPPLY)" = "true" ]; then apply_env=true; fi
+  if container_arg_present "${resource}" "${path}" --nudge; then nudge_flag=true; fi
+  if [ "$(container_env_value "${resource}" "${path}" CLUSTER_OPTIMIZER_NUDGE_LIVE)" = "true" ]; then nudge_env=true; fi
+
+  printf '%s %s %s %s\n' "${apply_flag}" "${apply_env}" "${nudge_flag}" "${nudge_env}"
+}
+
+# effective_mode echoes the live remediation paths a gate_state line implies,
+# or "dry-run". A path mutates only when its CLI flag AND its env gate are
+# both true; either one alone keeps it advisory.
+effective_mode() {
+  local apply_flag="$1" apply_env="$2" nudge_flag="$3" nudge_env="$4"
+  local live=""
+
+  if [ "${apply_flag}" = "true" ] && [ "${apply_env}" = "true" ]; then
+    live="auto-apply"
+  fi
+  if [ "${nudge_flag}" = "true" ] && [ "${nudge_env}" = "true" ]; then
+    live="${live:+${live}, }nudge"
+  fi
+  printf '%s\n' "${live:-dry-run}"
+}
+
+describe_mode() {
+  if [ "$1" = "dry-run" ]; then
+    printf 'dry-run\n'
+  else
+    printf 'LIVE (%s)\n' "$1"
+  fi
+}
+
+# latest_cronjob_run echoes "<job-name> <creationTimestamp>" for the most
+# recently created Job this CronJob owns, or nothing when the history limits
+# have pruned them all. `kubectl create job --from=cronjob/...` sets the same
+# ownerReference, so a --run-job verification counts as a run here too.
+latest_cronjob_run() {
+  kubectl get jobs -n "${NAMESPACE}" \
+    --sort-by=.metadata.creationTimestamp \
+    -o go-template="{{range .items}}{{\$job := .}}{{range .metadata.ownerReferences}}{{if and (eq .kind \"CronJob\") (eq .name \"${CRONJOB}\")}}{{\$job.metadata.name}} {{\$job.metadata.creationTimestamp}}{{\"\n\"}}{{end}}{{end}}{{end}}" \
+    2>/dev/null | tail -1
 }
 
 gate_row() {
@@ -218,6 +290,54 @@ gate_row() {
   fi
 }
 
+# report_last_run_mode reconciles the posture reported above -- which is read
+# off the CronJob, and so describes the NEXT run -- with the posture the most
+# recent run actually used. A CronJob update only reaches Jobs created after
+# it, so for up to one schedule interval the two disagree: the block above can
+# read LIVE while every run an operator can inspect is still dry-run, and the
+# logs appear to contradict the report. Say which one the logs are showing
+# instead of leaving that to be worked out. Informational, like the block
+# above: a posture that has not taken effect yet is not a failure.
+report_last_run_mode() {
+  local expected="$1"
+  local latest job_name job_created actual schedule
+  local apply_flag apply_env nudge_flag nudge_env
+
+  latest="$(latest_cronjob_run)" || latest=""
+  if [ -z "${latest}" ]; then
+    echo "Last run: none - no Job from this CronJob is left in history."
+    return
+  fi
+
+  read -r job_name job_created <<<"${latest}"
+
+  # The history limits can prune this Job between the listing above and the
+  # gate reads below, and an unreadable spec reads as all-gates-false. Probing
+  # first keeps that from being reported as "ran dry-run", which would claim a
+  # posture had not taken effect when it may well have -- the same misleading
+  # conclusion this whole report exists to prevent.
+  if ! kubectl get "job/${job_name}" -n "${NAMESPACE}" \
+    -o "jsonpath={${JOB_CONTAINER}.image}" >/dev/null 2>&1; then
+    echo "Last run: ${job_name} (${job_created}) - its spec is gone, so its posture cannot be read."
+    return
+  fi
+
+  read -r apply_flag apply_env nudge_flag nudge_env \
+    <<<"$(gate_state "job/${job_name}" "${JOB_CONTAINER}")"
+  actual="$(effective_mode "${apply_flag}" "${apply_env}" "${nudge_flag}" "${nudge_env}")"
+
+  if [ "${actual}" = "${expected}" ]; then
+    echo "Last run: ${job_name} (${job_created}) ran with this posture."
+    return
+  fi
+
+  schedule="$(kubectl get cronjob "${CRONJOB}" -n "${NAMESPACE}" -o jsonpath='{.spec.schedule}' 2>/dev/null)"
+  echo "Last run: ${job_name} (${job_created}) ran $(describe_mode "${actual}"), not $(describe_mode "${expected}")."
+  echo "       A CronJob update only reaches Jobs created after it, so the posture above"
+  echo "       first takes effect on the next scheduled run (${schedule:-unknown schedule})."
+  echo "       To exercise it now: scripts/verify-deployment.sh --run-job"
+}
+
 # report_remediation_mode prints the same decision the UI's "How remediation
 # mode is decided" popover shows, read from the live CronJob rather than from
 # a report. A path mutates only when its CLI flag AND its env gate are both
@@ -225,13 +345,11 @@ gate_row() {
 # This is a report, not an assertion: dry-run is a valid posture, so it never
 # fails the verification.
 report_remediation_mode() {
-  local apply_flag=false apply_env=false nudge_flag=false nudge_env=false
+  local apply_flag apply_env nudge_flag nudge_env
   local halt_value halt_active=false
 
-  if cronjob_arg_present --auto-apply; then apply_flag=true; fi
-  if cronjob_arg_present --nudge; then nudge_flag=true; fi
-  if [ "$(cronjob_env_value CLUSTER_OPTIMIZER_AUTOAPPLY)" = "true" ]; then apply_env=true; fi
-  if [ "$(cronjob_env_value CLUSTER_OPTIMIZER_NUDGE_LIVE)" = "true" ]; then nudge_env=true; fi
+  read -r apply_flag apply_env nudge_flag nudge_env \
+    <<<"$(gate_state "cronjob/${CRONJOB}" "${CRONJOB_CONTAINER}")"
 
   if halt_value="$(kubectl get configmap "${HALT_CONFIGMAP}" -n "${NAMESPACE}" \
     -o "jsonpath={.data.${HALT_KEY}}" 2>/dev/null)"; then
@@ -251,24 +369,22 @@ report_remediation_mode() {
     "$([ "${halt_active}" = "true" ] && echo "halted: ${NAMESPACE}/${HALT_CONFIGMAP} ${HALT_KEY}=true" || echo "no halt detected")"
 
   if [ "${halt_active}" = "true" ]; then
+    # Halt is read by the engine at run time, not baked into the pod spec, so
+    # it needs no last-run reconciliation: it applies from the next run on
+    # without a redeploy.
     echo "Effective mode: HALTED - the halt ConfigMap overrides both gates; nothing mutates."
     return
   fi
 
-  local live=""
-  if [ "${apply_flag}" = "true" ] && [ "${apply_env}" = "true" ]; then
-    live="auto-apply"
-  fi
-  if [ "${nudge_flag}" = "true" ] && [ "${nudge_env}" = "true" ]; then
-    live="${live:+${live}, }nudge"
-  fi
-
-  if [ -n "${live}" ]; then
-    echo "Effective mode: LIVE (${live}) - this cluster mutates workloads."
-  else
+  EFFECTIVE_MODE="$(effective_mode "${apply_flag}" "${apply_env}" "${nudge_flag}" "${nudge_env}")"
+  if [ "${EFFECTIVE_MODE}" = "dry-run" ]; then
     echo "Effective mode: dry-run - findings are reported, nothing is mutated."
     echo "       To go live: scripts/deploy-kubernetes.sh --live-apply [--live-nudge]"
+  else
+    echo "Effective mode: LIVE (${EFFECTIVE_MODE}) - this cluster mutates workloads."
   fi
+
+  report_last_run_mode "${EFFECTIVE_MODE}"
 }
 
 # rbac_can_i echoes "yes", "no", or "error" for a SubjectAccessReview run as
@@ -399,6 +515,10 @@ ENABLE_LIVE_NUDGE="${ENABLE_LIVE_NUDGE:-false}"
 HALT_CONFIGMAP="${HALT_CONFIGMAP:-cluster-optimizer-halt}"
 HALT_KEY="${HALT_KEY:-halt}"
 SA_USER="system:serviceaccount:${NAMESPACE}:${SERVICE_ACCOUNT}"
+# Set by report_remediation_mode to the CronJob's effective mode, so the
+# --run-job path can report whether the job it just ran exercised it. Stays
+# empty when the halt switch short-circuits the report.
+EFFECTIVE_MODE=""
 
 case "${ENABLE_DYNAMODB}" in
   true|false) ;;
@@ -567,3 +687,10 @@ if [ "${job_image}" != "${EXPECTED_IMAGE}" ]; then
 fi
 
 echo "Runtime check: PASSED - the verification job completed with ${job_image}."
+
+# The job just created is now the most recent run, so this closes the loop the
+# staleness warning above points at: it is the run that used the CronJob's
+# current posture.
+if [ -n "${EFFECTIVE_MODE}" ]; then
+  report_last_run_mode "${EFFECTIVE_MODE}"
+fi
