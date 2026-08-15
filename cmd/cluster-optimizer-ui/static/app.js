@@ -56,6 +56,8 @@ const els = {
   filter: document.querySelector("#filter"),
   enginePillMode: document.querySelector("#enginePillMode"),
   enginePillModeText: document.querySelector("#enginePillModeText"),
+  enginePillModeDetail: document.querySelector("#enginePillModeDetail"),
+  engineModeVerdict: document.querySelector("#engineModeVerdict"),
   enginePillHalt: document.querySelector("#enginePillHalt"),
   enginePillHaltText: document.querySelector("#enginePillHaltText"),
   enginePillHaltAction: document.querySelector("#enginePillHaltAction"),
@@ -618,10 +620,12 @@ function renderOverviewActions(report) {
 function renderEngineStatus() {
   const status = state.data?.engine_status || null;
   const mode = engineMode(status);
-  els.enginePillMode.classList.remove("live", "dry-run", "disabled");
+  els.enginePillMode.classList.remove("live", "dry-run", "partial", "disabled");
   els.enginePillMode.classList.add(mode.toneClass);
   els.enginePillModeText.textContent = mode.label;
+  els.enginePillModeDetail.textContent = mode.detail;
   els.enginePillMode.setAttribute("title", mode.tooltip);
+  els.enginePillMode.setAttribute("aria-label", `Mode: ${mode.label}. ${mode.detail}`);
 
   const halt = Boolean(status?.halt_active);
   els.enginePillHalt.classList.toggle("active", halt);
@@ -867,57 +871,206 @@ function showHaltConfirm() {
   requestAnimationFrame(() => cancel.focus());
 }
 
+// The three independently gated remediation paths. Each mutates the cluster
+// only when its CLI flag and its env gate are both set, so a status where one
+// pair is complete and another is not is a genuine mixed posture — not "Live".
+const REMEDIATION_PATHS = [
+  {
+    key: "auto-apply",
+    label: "auto-apply",
+    effect: "patches workload requests",
+    flagName: "--auto-apply",
+    envName: "CLUSTER_OPTIMIZER_AUTOAPPLY",
+    advisory: "reports right-sizing findings without patching",
+    enabled: (s) => Boolean(s?.auto_apply_enabled),
+    live: (s) => Boolean(s?.auto_apply_live)
+  },
+  {
+    key: "nudge",
+    label: "nudge",
+    effect: "cordons and evicts to consolidate",
+    flagName: "--nudge",
+    envName: "CLUSTER_OPTIMIZER_NUDGE_LIVE",
+    advisory: "logs the consolidation plan without cordoning or evicting",
+    enabled: (s) => Boolean(s?.nudge_enabled),
+    live: (s) => Boolean(s?.nudge_live)
+  },
+  {
+    key: "gc",
+    label: "pod GC",
+    effect: "deletes completed pods",
+    flagName: "--gc-completed-pods",
+    envName: "CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE",
+    advisory: "logs which completed pods it would delete",
+    enabled: (s) => Boolean(s?.gc_enabled),
+    live: (s) => Boolean(s?.gc_live)
+  }
+];
+
+// Splits the deployed paths into the ones that mutate and the ones that only
+// report. A path absent from the CronJob args is neither: it is not deployed,
+// so counting it as "not enabled" would demand a fix that no deploy flag makes.
+function remediationCoverage(status) {
+  const deployed = REMEDIATION_PATHS.filter((p) => p.enabled(status));
+  const live = deployed.filter((p) => p.live(status));
+  const advisory = deployed.filter((p) => !p.live(status));
+  return { deployed, live, advisory };
+}
+
 function engineMode(status) {
   if (!status) {
-    return { label: "Unknown", toneClass: "disabled", live: false, tooltip: "No engine status reported yet." };
+    return { label: "Unknown", detail: "", toneClass: "disabled", live: false, tooltip: "No engine status reported yet." };
   }
-  if (!status.auto_apply_enabled && !status.nudge_enabled) {
-    return { label: "Disabled", toneClass: "disabled", live: false, tooltip: "Neither --auto-apply nor --nudge is enabled on the CronJob." };
+  const { deployed, live, advisory } = remediationCoverage(status);
+  if (!deployed.length) {
+    return {
+      label: "Disabled",
+      detail: "No remediation path is deployed",
+      toneClass: "disabled",
+      live: false,
+      tooltip: "The CronJob passes none of --auto-apply, --nudge or --gc-completed-pods."
+    };
   }
   if (status.halt_active) {
-    return { label: "Halted", toneClass: "disabled", live: false, tooltip: "Halt ConfigMap is set; remediation is paused." };
+    return {
+      label: "Halted",
+      detail: `${deployed.length} path${deployed.length === 1 ? "" : "s"} paused by the halt ConfigMap`,
+      toneClass: "disabled",
+      live: false,
+      tooltip: "Halt ConfigMap is set; every remediation path is paused."
+    };
   }
-  const live = status.auto_apply_live || status.nudge_live;
-  if (live) {
-    return { label: "Live", toneClass: "live", live: true, tooltip: "Both --auto-apply (or --nudge) AND the matching env var are true. Mutations happen." };
+  const names = (paths) => paths.map((p) => p.label).join(", ");
+  if (!live.length) {
+    return {
+      label: "Dry-run",
+      detail: `${names(advisory)} report only`,
+      toneClass: "dry-run",
+      live: false,
+      tooltip: `Deployed but advisory: ${names(advisory)}. Each is missing its env gate, so nothing is mutated.`
+    };
   }
-  return { label: "Dry-run", toneClass: "dry-run", live: false, tooltip: "Engine is enabled but the second env-var gate is missing. No mutations." };
+  if (!advisory.length) {
+    return {
+      label: "Live",
+      detail: `All ${live.length} path${live.length === 1 ? "" : "s"} mutate: ${names(live)}`,
+      toneClass: "live",
+      live: true,
+      tooltip: `Every deployed path has both gates set: ${names(live)}. This cluster mutates workloads.`
+    };
+  }
+  // The case the flat "Live" label used to swallow. Say which paths mutate and
+  // which only report, in the label itself — an operator reading "Live" should
+  // never have to open the popover to learn a corrective action is still off.
+  return {
+    label: `Partly live · ${live.length} of ${deployed.length}`,
+    detail: `${names(live)} mutate · ${names(advisory)} report only`,
+    toneClass: "partial",
+    live: true,
+    tooltip: `Live: ${names(live)}. Not enabled: ${names(advisory)} — deployed but missing the env gate, so ${advisory.length === 1 ? "it reports" : "they report"} without acting.`
+  };
+}
+
+function gateLine(ok, text) {
+  return `<span class="${ok ? "gate-ok" : "gate-off"}">${ok ? "✓" : "✗"} ${escapeHtml(text)}</span>`;
 }
 
 function renderEnginePopover(status) {
   els.engineModeDetails.replaceChildren();
-  const rows = [
-    {
-      label: "auto-apply flag",
-      ok: Boolean(status?.auto_apply_enabled),
-      hint: status?.auto_apply_enabled ? "--auto-apply is passed" : "--auto-apply not set on the CronJob"
-    },
-    {
-      label: "auto-apply env",
-      ok: Boolean(status?.auto_apply_live),
-      hint: status?.auto_apply_live ? "CLUSTER_OPTIMIZER_AUTOAPPLY=true" : "CLUSTER_OPTIMIZER_AUTOAPPLY is not true"
-    },
-    {
-      label: "nudge flag",
-      ok: Boolean(status?.nudge_enabled),
-      hint: status?.nudge_enabled ? "--nudge is passed" : "--nudge not set on the CronJob"
-    },
-    {
-      label: "nudge live env",
-      ok: Boolean(status?.nudge_live),
-      hint: status?.nudge_live ? "CLUSTER_OPTIMIZER_NUDGE_LIVE=true" : "CLUSTER_OPTIMIZER_NUDGE_LIVE is not true"
-    },
-    {
-      label: "halt ConfigMap",
-      ok: !status?.halt_active,
-      hint: status?.halt_active ? `halted: ${status?.halt_reason || "halt=true"}` : "no halt detected"
+
+  REMEDIATION_PATHS.forEach((path) => {
+    const enabled = path.enabled(status);
+    const live = path.live(status);
+    const halted = Boolean(status?.halt_active);
+
+    let verdict = "Live";
+    let verdictClass = "live";
+    if (!enabled) {
+      verdict = "Not deployed";
+      verdictClass = "off";
+    } else if (halted) {
+      verdict = "Halted";
+      verdictClass = "off";
+    } else if (!live) {
+      verdict = "Reports only";
+      verdictClass = "advisory";
     }
-  ];
-  rows.forEach((row) => {
+
+    // *Live is the AND of both gates, so when the flag is absent the env
+    // value is unknown here. Claiming it is "not true" would be a guess, and
+    // the flag alone already decides the outcome.
+    const envLine = !enabled
+      ? gateLine(false, `${path.envName} not evaluated — the flag decides this path`)
+      : gateLine(live, live ? `${path.envName}=true` : `${path.envName} is not true`);
+
     const li = document.createElement("li");
-    li.innerHTML = `<b>${escapeHtml(row.label)}</b> — ${row.ok ? "✓" : "✗"} ${escapeHtml(row.hint)}`;
+    li.className = "engine-path";
+    li.innerHTML = `
+      <span class="engine-path-head">
+        <b>${escapeHtml(path.label)}</b>
+        <span class="engine-path-verdict ${verdictClass}">${escapeHtml(verdict)}</span>
+      </span>
+      <span class="engine-path-effect">${escapeHtml(live && !halted ? path.effect : path.advisory)}</span>
+      <span class="engine-path-gates">
+        ${gateLine(enabled, enabled ? `${path.flagName} is passed` : `${path.flagName} not set on the CronJob`)}
+        ${envLine}
+      </span>
+    `;
     els.engineModeDetails.append(li);
   });
+
+  const haltLi = document.createElement("li");
+  haltLi.className = "engine-path";
+  haltLi.innerHTML = `
+    <span class="engine-path-head">
+      <b>halt ConfigMap</b>
+      <span class="engine-path-verdict ${status?.halt_active ? "off" : "live"}">${status?.halt_active ? "Halted" : "Clear"}</span>
+    </span>
+    <span class="engine-path-gates">
+      ${gateLine(!status?.halt_active, status?.halt_active
+        ? `halted: ${status?.halt_reason || "halt=true"}`
+        : "cluster-optimizer/cluster-optimizer-halt is absent or not set to halt=true")}
+    </span>
+  `;
+  els.engineModeDetails.append(haltLi);
+
+  renderEngineModeVerdict(status);
+}
+
+// The one sentence an operator needs before acting: how many corrective paths
+// actually run, and what the rest are doing instead.
+function renderEngineModeVerdict(status) {
+  const el = els.engineModeVerdict;
+  if (!status) {
+    el.textContent = "No engine status reported yet.";
+    el.className = "engine-mode-verdict";
+    return;
+  }
+  const { deployed, live, advisory } = remediationCoverage(status);
+  const names = (paths) => paths.map((p) => p.label).join(", ");
+
+  if (status.halt_active) {
+    el.textContent = `Halted: the halt ConfigMap overrides every gate, so none of the ${deployed.length} deployed path(s) will act.`;
+    el.className = "engine-mode-verdict warn";
+    return;
+  }
+  if (!deployed.length) {
+    el.textContent = "No remediation path is deployed on this CronJob, so nothing will be corrected.";
+    el.className = "engine-mode-verdict warn";
+    return;
+  }
+  if (!live.length) {
+    el.textContent = `Nothing is corrected: ${names(advisory)} are deployed but each is missing its env gate.`;
+    el.className = "engine-mode-verdict warn";
+    return;
+  }
+  if (!advisory.length) {
+    el.textContent = `All ${live.length} deployed path(s) correct: ${names(live)}.`;
+    el.className = "engine-mode-verdict ok";
+    return;
+  }
+  el.textContent = `${live.length} of ${deployed.length} paths correct: ${names(live)}. Not enabled: ${names(advisory)} — ${advisory.map((p) => p.advisory).join("; ")}.`;
+  el.className = "engine-mode-verdict warn";
 }
 
 function toggleEngineModePopover(open) {

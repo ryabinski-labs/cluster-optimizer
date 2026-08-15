@@ -244,11 +244,16 @@ actually lower workload requests in-cluster you must:
 Both the env var and the flag must be present. Either alone keeps the
 applier in dry-run mode.
 
-The shipped manifests keep `CLUSTER_OPTIMIZER_AUTOAPPLY` and
-`CLUSTER_OPTIMIZER_NUDGE_LIVE` at `"false"` so that applying them directly is
-always advisory. If you deploy through the `Deploy Kubernetes` workflow, set
-the gates with its `enable_live_apply` / `enable_live_nudge` inputs instead of
-editing the manifests — see [docs/runbook.md](docs/runbook.md#go-live-or-back-to-dry-run-via-the-deploy-workflow).
+There are three independently gated remediation paths, each needing both its
+CLI flag and its env var: `--auto-apply` + `CLUSTER_OPTIMIZER_AUTOAPPLY`,
+`--nudge` + `CLUSTER_OPTIMIZER_NUDGE_LIVE`, and `--gc-completed-pods` +
+`CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE`.
+
+The shipped manifests keep all three env vars at `"false"` so that applying
+them directly is always advisory. If you deploy through the `Deploy Kubernetes`
+workflow, set the gates with its `enable_live_apply` / `enable_live_nudge` /
+`enable_live_gc` inputs instead of editing the manifests — all three default to
+`true` — see [docs/runbook.md](docs/runbook.md#go-live-or-back-to-dry-run-via-the-deploy-workflow).
 
 From a shell, the same steps are:
 
@@ -256,11 +261,13 @@ From a shell, the same steps are:
 # 1. RBAC for the applier.
 scripts/apply-rbac.sh --applier
 
-# 2. Env gate. --auto-apply / --nudge are already in the deployed manifest's args.
-scripts/deploy-kubernetes.sh --live-apply --live-nudge --wait
+# 2. Deploy. Every path goes live unless you opt out with --dry-run or
+#    --no-live-apply / --no-live-nudge / --no-live-gc.
+scripts/deploy-kubernetes.sh --wait
 
-# Confirm; declare the posture you expect or the config diff reports drift.
-ENABLE_LIVE_APPLY=true ENABLE_LIVE_NUDGE=true scripts/verify-deployment.sh
+# Confirm. Reports the effective mode, and names every path that is not
+# enabled along with the command that turns it on.
+scripts/verify-deployment.sh
 ```
 
 The applier refuses to mutate when any of the following apply:

@@ -68,16 +68,22 @@ type apiResponse struct {
 // type so the JSON wire format is owned here and stays stable even if the
 // store struct adds fields.
 type engineStatus struct {
-	AutoApplyEnabled bool      `json:"auto_apply_enabled"`
-	AutoApplyLive    bool      `json:"auto_apply_live"`
-	NudgeEnabled     bool      `json:"nudge_enabled"`
-	NudgeLive        bool      `json:"nudge_live"`
-	HaltActive       bool      `json:"halt_active"`
-	HaltReason       string    `json:"halt_reason,omitempty"`
-	LastRunAt        time.Time `json:"last_run_at"`
-	LastRunActions   int       `json:"last_run_actions"`
-	LastRunApplied   int       `json:"last_run_applied"`
-	LastRunErrors    int       `json:"last_run_errors"`
+	AutoApplyEnabled bool `json:"auto_apply_enabled"`
+	AutoApplyLive    bool `json:"auto_apply_live"`
+	NudgeEnabled     bool `json:"nudge_enabled"`
+	NudgeLive        bool `json:"nudge_live"`
+	// GCEnabled/GCLive gate the third remediation path (completed-pod
+	// deletion). Omitting them here is what let the dashboard render a flat
+	// "Live" for a cluster whose pod GC was still only logging what it would
+	// delete: the engine records the gates, the UI just never read them.
+	GCEnabled      bool      `json:"gc_enabled"`
+	GCLive         bool      `json:"gc_live"`
+	HaltActive     bool      `json:"halt_active"`
+	HaltReason     string    `json:"halt_reason,omitempty"`
+	LastRunAt      time.Time `json:"last_run_at"`
+	LastRunActions int       `json:"last_run_actions"`
+	LastRunApplied int       `json:"last_run_applied"`
+	LastRunErrors  int       `json:"last_run_errors"`
 }
 
 type remediationEvent struct {
@@ -569,6 +575,8 @@ func (s *server) engineStatusFor(ctx context.Context, clusterID string) (*engine
 			AutoApplyLive:    loaded.AutoApplyLive,
 			NudgeEnabled:     loaded.NudgeEnabled,
 			NudgeLive:        loaded.NudgeLive,
+			GCEnabled:        loaded.GCEnabled,
+			GCLive:           loaded.GCLive,
 			HaltActive:       loaded.HaltActive,
 			HaltReason:       loaded.HaltReason,
 			LastRunAt:        loaded.LastRunAt,

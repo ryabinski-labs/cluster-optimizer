@@ -13,6 +13,11 @@ The script also verifies that the live CronJob matches the rendered repo
 manifest, using the same inputs as the deploy workflow.
 
 The remediation-mode report reads the CronJob, so it describes the next run.
+It covers all three independently gated remediation paths — auto-apply, nudge,
+and completed-pod GC — reports the effective mode as LIVE only when every one
+of them mutates, and names each path that is NOT enabled together with the
+reason and the command that turns it on.
+
 It closes with the posture the most recent run actually used, since a CronJob
 update only reaches Jobs created after it — until the next tick the last run's
 logs still show the previous posture. --run-job creates a run that uses the
@@ -33,13 +38,18 @@ Environment overrides:
   DYNAMODB_TABLE DynamoDB table expected in CronJob env.
                  Default: cluster-optimizer-reports
   ENABLE_LIVE_APPLY
-                 Expected CLUSTER_OPTIMIZER_AUTOAPPLY value. Set true when the
-                 cluster was deployed with scripts/deploy-kubernetes.sh
-                 --live-apply, otherwise the config diff reports drift.
-                 Default: false
+                 Expected CLUSTER_OPTIMIZER_AUTOAPPLY value. Defaults to true
+                 to match scripts/deploy-kubernetes.sh, which deploys live.
+                 Set false when the cluster was deployed with --dry-run or
+                 --no-live-apply, otherwise the config diff reports drift.
+                 Default: true
   ENABLE_LIVE_NUDGE
-                 Expected CLUSTER_OPTIMIZER_NUDGE_LIVE value. Set true when the
-                 cluster was deployed with --live-nudge. Default: false
+                 Expected CLUSTER_OPTIMIZER_NUDGE_LIVE value. Set false when
+                 the cluster was deployed with --no-live-nudge. Default: true
+  ENABLE_LIVE_GC
+                 Expected CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE value. Set
+                 false when the cluster was deployed with --no-live-gc.
+                 Default: true
   HALT_CONFIGMAP Halt kill-switch ConfigMap name.
                  Default: cluster-optimizer-halt
   HALT_KEY       Key read from the halt ConfigMap. Default: halt
@@ -70,7 +80,8 @@ Examples:
   scripts/verify-deployment.sh --run-job
   scripts/verify-deployment.sh 2feb71995ad285b48d33b17f9b193a012dc2db24
   scripts/verify-deployment.sh 2feb71995ad285b48d33b17f9b193a012dc2db24 --run-job
-  ENABLE_LIVE_APPLY=true ENABLE_LIVE_NUDGE=true scripts/verify-deployment.sh
+  ENABLE_LIVE_APPLY=false ENABLE_LIVE_NUDGE=false ENABLE_LIVE_GC=false \
+    scripts/verify-deployment.sh   # verify a --dry-run deploy
 EOF
 }
 
@@ -145,10 +156,9 @@ render_expected_cronjob_manifest() {
   local manifest="$1"
 
   # Mirrors the deploy workflow's render: image, cluster id, table, and the
-  # two live-remediation gates it rewrites at deploy time. The committed
-  # manifests always carry "false", so a cluster deployed with
-  # --live-apply/--live-nudge only matches when the same expectation is
-  # declared here.
+  # three live-remediation gates it rewrites at deploy time. The committed
+  # manifests always carry "false", so a cluster deployed live only matches
+  # when the same expectation is declared here.
   if [ "${ENABLE_DYNAMODB}" = "true" ]; then
     kubectl patch --local -f "${manifest}" --type=merge \
       -p "{\"metadata\":{\"name\":\"${CRONJOB}\",\"namespace\":\"${NAMESPACE}\"}}" \
@@ -157,7 +167,8 @@ render_expected_cronjob_manifest() {
       kubectl_local set env "CLUSTER_OPTIMIZER_CLUSTER_ID=${CLUSTER_ID}" |
       kubectl_local set env "DYNAMODB_TABLE=${DYNAMODB_TABLE}" |
       set_gate_env CLUSTER_OPTIMIZER_AUTOAPPLY "${ENABLE_LIVE_APPLY}" |
-      set_gate_env CLUSTER_OPTIMIZER_NUDGE_LIVE "${ENABLE_LIVE_NUDGE}"
+      set_gate_env CLUSTER_OPTIMIZER_NUDGE_LIVE "${ENABLE_LIVE_NUDGE}" |
+      set_gate_env CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE "${ENABLE_LIVE_GC}"
   else
     kubectl patch --local -f "${manifest}" --type=merge \
       -p "{\"metadata\":{\"name\":\"${CRONJOB}\",\"namespace\":\"${NAMESPACE}\"}}" \
@@ -165,7 +176,8 @@ render_expected_cronjob_manifest() {
       kubectl_local set image "optimizer=${EXPECTED_IMAGE}" |
       kubectl_local set env "CLUSTER_OPTIMIZER_CLUSTER_ID=${CLUSTER_ID}" |
       set_gate_env CLUSTER_OPTIMIZER_AUTOAPPLY "${ENABLE_LIVE_APPLY}" |
-      set_gate_env CLUSTER_OPTIMIZER_NUDGE_LIVE "${ENABLE_LIVE_NUDGE}"
+      set_gate_env CLUSTER_OPTIMIZER_NUDGE_LIVE "${ENABLE_LIVE_NUDGE}" |
+      set_gate_env CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE "${ENABLE_LIVE_GC}"
   fi
 }
 
@@ -229,18 +241,25 @@ container_env_value() {
     -o "jsonpath={${path}.env[?(@.name=='${name}')].value}" 2>/dev/null
 }
 
-# gate_state echoes a container spec's four remediation gate inputs as
-# "apply_flag apply_env nudge_flag nudge_env", each "true" or "false".
+# gate_state echoes a container spec's six remediation gate inputs as
+# "apply_flag apply_env nudge_flag nudge_env gc_flag gc_env", each "true" or
+# "false". There are three independently gated remediation paths, not two:
+# omitting pod GC here is what let a cluster with --gc-completed-pods and
+# CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE=false report a flat "LIVE".
 gate_state() {
   local resource="$1" path="$2"
   local apply_flag=false apply_env=false nudge_flag=false nudge_env=false
+  local gc_flag=false gc_env=false
 
   if container_arg_present "${resource}" "${path}" --auto-apply; then apply_flag=true; fi
   if [ "$(container_env_value "${resource}" "${path}" CLUSTER_OPTIMIZER_AUTOAPPLY)" = "true" ]; then apply_env=true; fi
   if container_arg_present "${resource}" "${path}" --nudge; then nudge_flag=true; fi
   if [ "$(container_env_value "${resource}" "${path}" CLUSTER_OPTIMIZER_NUDGE_LIVE)" = "true" ]; then nudge_env=true; fi
+  if container_arg_present "${resource}" "${path}" --gc-completed-pods; then gc_flag=true; fi
+  if [ "$(container_env_value "${resource}" "${path}" CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE)" = "true" ]; then gc_env=true; fi
 
-  printf '%s %s %s %s\n' "${apply_flag}" "${apply_env}" "${nudge_flag}" "${nudge_env}"
+  printf '%s %s %s %s %s %s\n' \
+    "${apply_flag}" "${apply_env}" "${nudge_flag}" "${nudge_env}" "${gc_flag}" "${gc_env}"
 }
 
 # effective_mode echoes the live remediation paths a gate_state line implies,
@@ -248,6 +267,7 @@ gate_state() {
 # both true; either one alone keeps it advisory.
 effective_mode() {
   local apply_flag="$1" apply_env="$2" nudge_flag="$3" nudge_env="$4"
+  local gc_flag="$5" gc_env="$6"
   local live=""
 
   if [ "${apply_flag}" = "true" ] && [ "${apply_env}" = "true" ]; then
@@ -256,7 +276,59 @@ effective_mode() {
   if [ "${nudge_flag}" = "true" ] && [ "${nudge_env}" = "true" ]; then
     live="${live:+${live}, }nudge"
   fi
+  if [ "${gc_flag}" = "true" ] && [ "${gc_env}" = "true" ]; then
+    live="${live:+${live}, }pod GC"
+  fi
   printf '%s\n' "${live:-dry-run}"
+}
+
+# report_not_enabled names every remediation path that will NOT mutate and why,
+# with the exact command that turns it on. A path can be advisory for two
+# different reasons -- its flag is absent from the manifest args, or its env
+# gate is false -- and the fix differs, so the reason is part of the report.
+report_not_enabled() {
+  local apply_flag="$1" apply_env="$2" nudge_flag="$3" nudge_env="$4"
+  local gc_flag="$5" gc_env="$6"
+  local found=false
+
+  _not_enabled_row() {
+    local label="$1" flag="$2" env="$3" arg="$4" var="$5" fix="$6"
+
+    if [ "${flag}" = "true" ] && [ "${env}" = "true" ]; then
+      return
+    fi
+    if [ "${found}" = "false" ]; then
+      echo "Not enabled (these paths report findings but change nothing):"
+      found=true
+    fi
+
+    # The two reasons need different fixes. A false env gate is a deploy input.
+    # A missing CLI flag means the deployed manifest does not carry the path at
+    # all -- only examples/cronjob-dynamodb.yaml passes all three -- so no
+    # combination of deploy flags will turn it on.
+    if [ "${flag}" != "true" ]; then
+      echo "  ${label}: ${arg} is missing from the CronJob args, so the path is not deployed."
+      echo "       Fix: deploy examples/cronjob-dynamodb.yaml (ENABLE_DYNAMODB=true); it passes all three flags."
+      return
+    fi
+    echo "  ${label}: ${arg} is passed, but ${var} is not true."
+    echo "       Turn it on: ${fix}"
+  }
+
+  _not_enabled_row "auto-apply" "${apply_flag}" "${apply_env}" \
+    "--auto-apply" CLUSTER_OPTIMIZER_AUTOAPPLY \
+    "scripts/deploy-kubernetes.sh --live-apply"
+  _not_enabled_row "nudge     " "${nudge_flag}" "${nudge_env}" \
+    "--nudge" CLUSTER_OPTIMIZER_NUDGE_LIVE \
+    "scripts/deploy-kubernetes.sh --live-nudge"
+  _not_enabled_row "pod GC    " "${gc_flag}" "${gc_env}" \
+    "--gc-completed-pods" CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE \
+    "scripts/deploy-kubernetes.sh --live-gc"
+
+  unset -f _not_enabled_row
+  if [ "${found}" = "false" ]; then
+    echo "Not enabled: none - every remediation path is live."
+  fi
 }
 
 describe_mode() {
@@ -301,7 +373,7 @@ gate_row() {
 report_last_run_mode() {
   local expected="$1"
   local latest job_name job_created actual schedule
-  local apply_flag apply_env nudge_flag nudge_env
+  local apply_flag apply_env nudge_flag nudge_env gc_flag gc_env
 
   latest="$(latest_cronjob_run)" || latest=""
   if [ -z "${latest}" ]; then
@@ -322,9 +394,10 @@ report_last_run_mode() {
     return
   fi
 
-  read -r apply_flag apply_env nudge_flag nudge_env \
+  read -r apply_flag apply_env nudge_flag nudge_env gc_flag gc_env \
     <<<"$(gate_state "job/${job_name}" "${JOB_CONTAINER}")"
-  actual="$(effective_mode "${apply_flag}" "${apply_env}" "${nudge_flag}" "${nudge_env}")"
+  actual="$(effective_mode "${apply_flag}" "${apply_env}" "${nudge_flag}" "${nudge_env}" \
+    "${gc_flag}" "${gc_env}")"
 
   if [ "${actual}" = "${expected}" ]; then
     echo "Last run: ${job_name} (${job_created}) ran with this posture."
@@ -345,10 +418,10 @@ report_last_run_mode() {
 # This is a report, not an assertion: dry-run is a valid posture, so it never
 # fails the verification.
 report_remediation_mode() {
-  local apply_flag apply_env nudge_flag nudge_env
+  local apply_flag apply_env nudge_flag nudge_env gc_flag gc_env
   local halt_value halt_active=false
 
-  read -r apply_flag apply_env nudge_flag nudge_env \
+  read -r apply_flag apply_env nudge_flag nudge_env gc_flag gc_env \
     <<<"$(gate_state "cronjob/${CRONJOB}" "${CRONJOB_CONTAINER}")"
 
   if halt_value="$(kubectl get configmap "${HALT_CONFIGMAP}" -n "${NAMESPACE}" \
@@ -365,6 +438,10 @@ report_remediation_mode() {
     "$([ "${nudge_flag}" = "true" ] && echo "--nudge is passed" || echo "--nudge not set on the CronJob")"
   gate_row "nudge live env " "${nudge_env}" \
     "$([ "${nudge_env}" = "true" ] && echo "CLUSTER_OPTIMIZER_NUDGE_LIVE=true" || echo "CLUSTER_OPTIMIZER_NUDGE_LIVE is not true")"
+  gate_row "pod GC flag    " "${gc_flag}" \
+    "$([ "${gc_flag}" = "true" ] && echo "--gc-completed-pods is passed" || echo "--gc-completed-pods not set on the CronJob")"
+  gate_row "pod GC live env" "${gc_env}" \
+    "$([ "${gc_env}" = "true" ] && echo "CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE=true" || echo "CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE is not true")"
   gate_row "halt ConfigMap " "$([ "${halt_active}" = "true" ] && echo false || echo true)" \
     "$([ "${halt_active}" = "true" ] && echo "halted: ${NAMESPACE}/${HALT_CONFIGMAP} ${HALT_KEY}=true" || echo "no halt detected")"
 
@@ -372,18 +449,26 @@ report_remediation_mode() {
     # Halt is read by the engine at run time, not baked into the pod spec, so
     # it needs no last-run reconciliation: it applies from the next run on
     # without a redeploy.
-    echo "Effective mode: HALTED - the halt ConfigMap overrides both gates; nothing mutates."
+    echo "Effective mode: HALTED - the halt ConfigMap overrides every gate; nothing mutates."
     return
   fi
 
-  EFFECTIVE_MODE="$(effective_mode "${apply_flag}" "${apply_env}" "${nudge_flag}" "${nudge_env}")"
+  EFFECTIVE_MODE="$(effective_mode "${apply_flag}" "${apply_env}" "${nudge_flag}" "${nudge_env}" \
+    "${gc_flag}" "${gc_env}")"
   if [ "${EFFECTIVE_MODE}" = "dry-run" ]; then
     echo "Effective mode: dry-run - findings are reported, nothing is mutated."
-    echo "       To go live: scripts/deploy-kubernetes.sh --live-apply [--live-nudge]"
+    echo "       To go live: scripts/deploy-kubernetes.sh   (live apply + nudge + pod GC by default)"
+  elif [ "${EFFECTIVE_MODE}" = "auto-apply, nudge, pod GC" ]; then
+    echo "Effective mode: LIVE (${EFFECTIVE_MODE}) - every remediation path mutates this cluster."
   else
-    echo "Effective mode: LIVE (${EFFECTIVE_MODE}) - this cluster mutates workloads."
+    # Naming the live paths and the advisory ones separately is the whole point:
+    # a partially live cluster reported as a flat "LIVE" reads as "everything
+    # is corrective", which is how pod GC went unnoticed as dry-run.
+    echo "Effective mode: PARTLY LIVE (${EFFECTIVE_MODE}) - only the paths named here mutate."
   fi
 
+  report_not_enabled "${apply_flag}" "${apply_env}" "${nudge_flag}" "${nudge_env}" \
+    "${gc_flag}" "${gc_env}"
   report_last_run_mode "${EFFECTIVE_MODE}"
 }
 
@@ -510,8 +595,13 @@ TARGETS_KEY="${TARGETS_KEY:-remediation-targets.json}"
 VERIFY_TARGETS_CONFIG="${VERIFY_TARGETS_CONFIG:-auto}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-cluster-optimizer}"
 VERIFY_RBAC="${VERIFY_RBAC:-auto}"
-ENABLE_LIVE_APPLY="${ENABLE_LIVE_APPLY:-false}"
-ENABLE_LIVE_NUDGE="${ENABLE_LIVE_NUDGE:-false}"
+# Mirrors the deploy script's live-by-default posture so the config-sync diff
+# below expects what a plain `scripts/deploy-kubernetes.sh` actually leaves
+# behind. Verifying a cluster deployed with --dry-run or --no-live-* means
+# declaring the same choice here.
+ENABLE_LIVE_APPLY="${ENABLE_LIVE_APPLY:-true}"
+ENABLE_LIVE_NUDGE="${ENABLE_LIVE_NUDGE:-true}"
+ENABLE_LIVE_GC="${ENABLE_LIVE_GC:-true}"
 HALT_CONFIGMAP="${HALT_CONFIGMAP:-cluster-optimizer-halt}"
 HALT_KEY="${HALT_KEY:-halt}"
 SA_USER="system:serviceaccount:${NAMESPACE}:${SERVICE_ACCOUNT}"
@@ -540,6 +630,14 @@ case "${ENABLE_LIVE_NUDGE}" in
   true|false) ;;
   *)
     echo "error: ENABLE_LIVE_NUDGE must be 'true' or 'false'" >&2
+    exit 2
+    ;;
+esac
+
+case "${ENABLE_LIVE_GC}" in
+  true|false) ;;
+  *)
+    echo "error: ENABLE_LIVE_GC must be 'true' or 'false'" >&2
     exit 2
     ;;
 esac
@@ -619,7 +717,7 @@ echo "Pull policy: ${pull_policy:-<unset>}"
 echo "Last successful schedule: ${last_success:-<none>}"
 if [ "${VERIFY_CONFIG}" = "true" ]; then
   echo "Expected config manifest: ${CONFIG_MANIFEST}"
-  echo "Expected live gates: CLUSTER_OPTIMIZER_AUTOAPPLY=${ENABLE_LIVE_APPLY} CLUSTER_OPTIMIZER_NUDGE_LIVE=${ENABLE_LIVE_NUDGE}"
+  echo "Expected live gates: CLUSTER_OPTIMIZER_AUTOAPPLY=${ENABLE_LIVE_APPLY} CLUSTER_OPTIMIZER_NUDGE_LIVE=${ENABLE_LIVE_NUDGE} CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE=${ENABLE_LIVE_GC}"
 fi
 
 if [ "${actual_image}" != "${EXPECTED_IMAGE}" ]; then

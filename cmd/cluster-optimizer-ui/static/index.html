@@ -51,6 +51,7 @@
         <button id="enginePillMode" class="engine-pill" type="button" aria-haspopup="dialog" aria-expanded="false">
           <em>Mode</em>
           <b id="enginePillModeText">Unknown</b>
+          <small id="enginePillModeDetail"></small>
         </button>
         <div id="enginePillHalt" class="engine-pill halt">
           <em>Halt switch</em>
@@ -69,8 +70,9 @@
 
       <section id="engineModePopover" class="engine-popover hidden" role="dialog" aria-label="Mode details">
         <h3>How remediation mode is decided</h3>
-        <p>Live remediation requires <em>both</em> the <code>--auto-apply</code> CLI flag <em>and</em> the <code>CLUSTER_OPTIMIZER_AUTOAPPLY=true</code> environment variable. Either one alone keeps the engine in dry-run mode. The halt ConfigMap overrides both.</p>
+        <p>There are three independently gated remediation paths. Each one acts only when <em>both</em> its CLI flag <em>and</em> its matching environment variable are set; either alone leaves that path reporting without changing anything. The halt ConfigMap overrides all three.</p>
         <ul id="engineModeDetails"></ul>
+        <p id="engineModeVerdict" class="engine-mode-verdict"></p>
         <button type="button" class="engine-popover-close">Close</button>
       </section>
 
