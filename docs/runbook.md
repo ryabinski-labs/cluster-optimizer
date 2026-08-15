@@ -223,6 +223,24 @@ checks the UI popover shows, read from the live CronJob — and the effective
 mode they add up to. That block is informational; dry-run is a valid posture,
 so it never fails the verification.
 
+Because those checks read the CronJob, they describe the **next** run. A
+CronJob update only reaches Jobs created after it, so until the next tick the
+last run still carries the previous posture and its logs say `DRY-RUN` while
+the block says `LIVE`. The closing `Last run:` line names which of the two you
+are looking at:
+
+```
+Effective mode: LIVE (auto-apply, nudge) - this cluster mutates workloads.
+Last run: cluster-optimizer-29779710 (2026-08-15T08:30:00Z) ran dry-run, not LIVE (auto-apply, nudge).
+       A CronJob update only reaches Jobs created after it, so the posture above
+       first takes effect on the next scheduled run (*/30 * * * *).
+       To exercise it now: scripts/verify-deployment.sh --run-job
+```
+
+Wait for the next scheduled run, or use `--run-job` to create one immediately
+from the current CronJob — on a live cluster that run mutates workloads. Once
+a run has used the posture the line reads `ran with this posture.` instead.
+
 `CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE` has no workflow input yet — it is
 still enabled by editing the manifest or patching the CronJob directly.
 
