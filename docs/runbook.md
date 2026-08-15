@@ -196,6 +196,33 @@ returns the cluster to dry-run. The `Show deployment` step prints the gate
 values it actually deployed. The `--auto-apply` / `--nudge` args and the halt
 ConfigMap are unaffected by these inputs; the halt switch still overrides both.
 
+From a maintainer workstation, `scripts/deploy-kubernetes.sh` sets both inputs:
+
+```bash
+# Grant the applier its narrow patch permissions first, or every patch 403s.
+scripts/apply-rbac.sh --applier
+
+# Deploy live. Omitting the flags on the next deploy returns it to dry-run.
+scripts/deploy-kubernetes.sh --live-apply --live-nudge --wait
+
+# Confirm the posture that actually landed.
+ENABLE_LIVE_APPLY=true ENABLE_LIVE_NUDGE=true scripts/verify-deployment.sh
+```
+
+The script refuses `--live-apply` / `--live-nudge` when `ENABLE_DYNAMODB=false`.
+For apply that mirrors the workflow's own check; for nudge it is stricter,
+because `manifests/cronjob.yaml` keeps both gates commented out and the
+workflow only rewrites an env var that already exists — asking for a live
+nudge there would deploy dry-run while reporting success.
+
+`verify-deployment.sh` renders the expected CronJob with the same gate values,
+so tell it which posture you expect (`ENABLE_LIVE_APPLY` / `ENABLE_LIVE_NUDGE`,
+both defaulting to `false`) or it reports the live gates as config drift. It
+also prints a `Remediation mode: how it is decided` block — the same five
+checks the UI popover shows, read from the live CronJob — and the effective
+mode they add up to. That block is informational; dry-run is a valid posture,
+so it never fails the verification.
+
 `CLUSTER_OPTIMIZER_GC_COMPLETED_PODS_LIVE` has no workflow input yet — it is
 still enabled by editing the manifest or patching the CronJob directly.
 

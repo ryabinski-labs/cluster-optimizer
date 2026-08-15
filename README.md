@@ -250,6 +250,19 @@ always advisory. If you deploy through the `Deploy Kubernetes` workflow, set
 the gates with its `enable_live_apply` / `enable_live_nudge` inputs instead of
 editing the manifests — see [docs/runbook.md](docs/runbook.md#go-live-or-back-to-dry-run-via-the-deploy-workflow).
 
+From a shell, the same steps are:
+
+```bash
+# 1. RBAC for the applier.
+scripts/apply-rbac.sh --applier
+
+# 2. Env gate. --auto-apply / --nudge are already in the deployed manifest's args.
+scripts/deploy-kubernetes.sh --live-apply --live-nudge --wait
+
+# Confirm; declare the posture you expect or the config diff reports drift.
+ENABLE_LIVE_APPLY=true ENABLE_LIVE_NUDGE=true scripts/verify-deployment.sh
+```
+
 The applier refuses to mutate when any of the following apply:
 - The workload is provider-managed (DOKS DaemonSets such as `kube-proxy`,
   `cilium`, `csi-do-node`, `do-node-agent`, `coredns`, `metrics-server`,
