@@ -26,6 +26,17 @@ Environment overrides:
   CLUSTER_ID     Logical cluster id expected in CronJob env. Default: default
   DYNAMODB_TABLE DynamoDB table expected in CronJob env.
                  Default: cluster-optimizer-reports
+  ENABLE_LIVE_APPLY
+                 Expected CLUSTER_OPTIMIZER_AUTOAPPLY value. Set true when the
+                 cluster was deployed with scripts/deploy-kubernetes.sh
+                 --live-apply, otherwise the config diff reports drift.
+                 Default: false
+  ENABLE_LIVE_NUDGE
+                 Expected CLUSTER_OPTIMIZER_NUDGE_LIVE value. Set true when the
+                 cluster was deployed with --live-nudge. Default: false
+  HALT_CONFIGMAP Halt kill-switch ConfigMap name.
+                 Default: cluster-optimizer-halt
+  HALT_KEY       Key read from the halt ConfigMap. Default: halt
   VERIFY_CONFIG  Verify rendered CronJob manifest matches the live CronJob.
                  Default: true
   TARGETS_FILE   Local remediation targets config.
@@ -53,6 +64,7 @@ Examples:
   scripts/verify-deployment.sh --run-job
   scripts/verify-deployment.sh 2feb71995ad285b48d33b17f9b193a012dc2db24
   scripts/verify-deployment.sh 2feb71995ad285b48d33b17f9b193a012dc2db24 --run-job
+  ENABLE_LIVE_APPLY=true ENABLE_LIVE_NUDGE=true scripts/verify-deployment.sh
 EOF
 }
 
@@ -90,22 +102,64 @@ latest_published_image_tag() {
     --jq 'map(select(.conclusion == "success"))[0].headSha // ""'
 }
 
+# kubectl_local runs a --local kubectl mutation over the manifest streamed on
+# stdin and echoes the result. kubectl (confirmed on v1.35) prints NOTHING and
+# exits 0 when the requested value is already in effect — which is the common
+# case here, since CLUSTER_ID defaults to "default" and DYNAMODB_TABLE defaults
+# to the value the manifest already carries. Piping that straight into the next
+# stage empties the whole rendered manifest and turns the config-sync check
+# into a vacuous pass, so fall back to the unchanged input.
+kubectl_local() {
+  local input result
+  input="$(cat)"
+  result="$(printf '%s\n' "${input}" | kubectl "$@" --local -f - -o yaml)"
+  printf '%s\n' "${result:-${input}}"
+}
+
+# set_gate_env rewrites a live-remediation gate on the manifest streamed on
+# stdin, but only when that manifest already declares the variable. The deploy
+# workflow rewrites the value of an existing env entry; it never adds one. In
+# manifests/cronjob.yaml both gates are commented out, so setting them here
+# would invent an env var the live CronJob cannot have and report drift that
+# does not exist.
+set_gate_env() {
+  local name="$1"
+  local value="$2"
+  local rendered
+  rendered="$(cat)"
+
+  if printf '%s\n' "${rendered}" | grep -q "name: ${name}$"; then
+    printf '%s\n' "${rendered}" | kubectl_local set env "${name}=${value}"
+  else
+    printf '%s\n' "${rendered}"
+  fi
+}
+
 render_expected_cronjob_manifest() {
   local manifest="$1"
 
+  # Mirrors the deploy workflow's render: image, cluster id, table, and the
+  # two live-remediation gates it rewrites at deploy time. The committed
+  # manifests always carry "false", so a cluster deployed with
+  # --live-apply/--live-nudge only matches when the same expectation is
+  # declared here.
   if [ "${ENABLE_DYNAMODB}" = "true" ]; then
     kubectl patch --local -f "${manifest}" --type=merge \
       -p "{\"metadata\":{\"name\":\"${CRONJOB}\",\"namespace\":\"${NAMESPACE}\"}}" \
       -o yaml |
-      kubectl set image --local -f - "optimizer=${EXPECTED_IMAGE}" -o yaml |
-      kubectl set env --local -f - "CLUSTER_OPTIMIZER_CLUSTER_ID=${CLUSTER_ID}" -o yaml |
-      kubectl set env --local -f - "DYNAMODB_TABLE=${DYNAMODB_TABLE}" -o yaml
+      kubectl_local set image "optimizer=${EXPECTED_IMAGE}" |
+      kubectl_local set env "CLUSTER_OPTIMIZER_CLUSTER_ID=${CLUSTER_ID}" |
+      kubectl_local set env "DYNAMODB_TABLE=${DYNAMODB_TABLE}" |
+      set_gate_env CLUSTER_OPTIMIZER_AUTOAPPLY "${ENABLE_LIVE_APPLY}" |
+      set_gate_env CLUSTER_OPTIMIZER_NUDGE_LIVE "${ENABLE_LIVE_NUDGE}"
   else
     kubectl patch --local -f "${manifest}" --type=merge \
       -p "{\"metadata\":{\"name\":\"${CRONJOB}\",\"namespace\":\"${NAMESPACE}\"}}" \
       -o yaml |
-      kubectl set image --local -f - "optimizer=${EXPECTED_IMAGE}" -o yaml |
-      kubectl set env --local -f - "CLUSTER_OPTIMIZER_CLUSTER_ID=${CLUSTER_ID}" -o yaml
+      kubectl_local set image "optimizer=${EXPECTED_IMAGE}" |
+      kubectl_local set env "CLUSTER_OPTIMIZER_CLUSTER_ID=${CLUSTER_ID}" |
+      set_gate_env CLUSTER_OPTIMIZER_AUTOAPPLY "${ENABLE_LIVE_APPLY}" |
+      set_gate_env CLUSTER_OPTIMIZER_NUDGE_LIVE "${ENABLE_LIVE_NUDGE}"
   fi
 }
 
@@ -139,6 +193,82 @@ verify_targets_config_sync() {
   fi
 
   echo "Targets config sync: YES - the live ConfigMap matches ${TARGETS_FILE}."
+}
+
+cronjob_arg_present() {
+  kubectl get cronjob "${CRONJOB}" -n "${NAMESPACE}" \
+    -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].args[*]}' 2>/dev/null |
+    tr ' ' '\n' | grep -qx -- "$1"
+}
+
+cronjob_env_value() {
+  kubectl get cronjob "${CRONJOB}" -n "${NAMESPACE}" \
+    -o "jsonpath={.spec.jobTemplate.spec.template.spec.containers[0].env[?(@.name=='$1')].value}" 2>/dev/null
+}
+
+gate_row() {
+  local label="$1"
+  local ok="$2"
+  local hint="$3"
+
+  if [ "${ok}" = "true" ]; then
+    echo "  ${label}: yes - ${hint}"
+  else
+    echo "  ${label}: no  - ${hint}"
+  fi
+}
+
+# report_remediation_mode prints the same decision the UI's "How remediation
+# mode is decided" popover shows, read from the live CronJob rather than from
+# a report. A path mutates only when its CLI flag AND its env gate are both
+# true and the halt ConfigMap is not set; either gate alone keeps it dry-run.
+# This is a report, not an assertion: dry-run is a valid posture, so it never
+# fails the verification.
+report_remediation_mode() {
+  local apply_flag=false apply_env=false nudge_flag=false nudge_env=false
+  local halt_value halt_active=false
+
+  if cronjob_arg_present --auto-apply; then apply_flag=true; fi
+  if cronjob_arg_present --nudge; then nudge_flag=true; fi
+  if [ "$(cronjob_env_value CLUSTER_OPTIMIZER_AUTOAPPLY)" = "true" ]; then apply_env=true; fi
+  if [ "$(cronjob_env_value CLUSTER_OPTIMIZER_NUDGE_LIVE)" = "true" ]; then nudge_env=true; fi
+
+  if halt_value="$(kubectl get configmap "${HALT_CONFIGMAP}" -n "${NAMESPACE}" \
+    -o "jsonpath={.data.${HALT_KEY}}" 2>/dev/null)"; then
+    if [ "${halt_value}" = "true" ]; then halt_active=true; fi
+  fi
+
+  echo "Remediation mode: how it is decided"
+  gate_row "auto-apply flag" "${apply_flag}" \
+    "$([ "${apply_flag}" = "true" ] && echo "--auto-apply is passed" || echo "--auto-apply not set on the CronJob")"
+  gate_row "auto-apply env " "${apply_env}" \
+    "$([ "${apply_env}" = "true" ] && echo "CLUSTER_OPTIMIZER_AUTOAPPLY=true" || echo "CLUSTER_OPTIMIZER_AUTOAPPLY is not true")"
+  gate_row "nudge flag     " "${nudge_flag}" \
+    "$([ "${nudge_flag}" = "true" ] && echo "--nudge is passed" || echo "--nudge not set on the CronJob")"
+  gate_row "nudge live env " "${nudge_env}" \
+    "$([ "${nudge_env}" = "true" ] && echo "CLUSTER_OPTIMIZER_NUDGE_LIVE=true" || echo "CLUSTER_OPTIMIZER_NUDGE_LIVE is not true")"
+  gate_row "halt ConfigMap " "$([ "${halt_active}" = "true" ] && echo false || echo true)" \
+    "$([ "${halt_active}" = "true" ] && echo "halted: ${NAMESPACE}/${HALT_CONFIGMAP} ${HALT_KEY}=true" || echo "no halt detected")"
+
+  if [ "${halt_active}" = "true" ]; then
+    echo "Effective mode: HALTED - the halt ConfigMap overrides both gates; nothing mutates."
+    return
+  fi
+
+  local live=""
+  if [ "${apply_flag}" = "true" ] && [ "${apply_env}" = "true" ]; then
+    live="auto-apply"
+  fi
+  if [ "${nudge_flag}" = "true" ] && [ "${nudge_env}" = "true" ]; then
+    live="${live:+${live}, }nudge"
+  fi
+
+  if [ -n "${live}" ]; then
+    echo "Effective mode: LIVE (${live}) - this cluster mutates workloads."
+  else
+    echo "Effective mode: dry-run - findings are reported, nothing is mutated."
+    echo "       To go live: scripts/deploy-kubernetes.sh --live-apply [--live-nudge]"
+  fi
 }
 
 # rbac_can_i echoes "yes", "no", or "error" for a SubjectAccessReview run as
@@ -264,12 +394,32 @@ TARGETS_KEY="${TARGETS_KEY:-remediation-targets.json}"
 VERIFY_TARGETS_CONFIG="${VERIFY_TARGETS_CONFIG:-auto}"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-cluster-optimizer}"
 VERIFY_RBAC="${VERIFY_RBAC:-auto}"
+ENABLE_LIVE_APPLY="${ENABLE_LIVE_APPLY:-false}"
+ENABLE_LIVE_NUDGE="${ENABLE_LIVE_NUDGE:-false}"
+HALT_CONFIGMAP="${HALT_CONFIGMAP:-cluster-optimizer-halt}"
+HALT_KEY="${HALT_KEY:-halt}"
 SA_USER="system:serviceaccount:${NAMESPACE}:${SERVICE_ACCOUNT}"
 
 case "${ENABLE_DYNAMODB}" in
   true|false) ;;
   *)
     echo "error: ENABLE_DYNAMODB must be 'true' or 'false'" >&2
+    exit 2
+    ;;
+esac
+
+case "${ENABLE_LIVE_APPLY}" in
+  true|false) ;;
+  *)
+    echo "error: ENABLE_LIVE_APPLY must be 'true' or 'false'" >&2
+    exit 2
+    ;;
+esac
+
+case "${ENABLE_LIVE_NUDGE}" in
+  true|false) ;;
+  *)
+    echo "error: ENABLE_LIVE_NUDGE must be 'true' or 'false'" >&2
     exit 2
     ;;
 esac
@@ -349,6 +499,7 @@ echo "Pull policy: ${pull_policy:-<unset>}"
 echo "Last successful schedule: ${last_success:-<none>}"
 if [ "${VERIFY_CONFIG}" = "true" ]; then
   echo "Expected config manifest: ${CONFIG_MANIFEST}"
+  echo "Expected live gates: CLUSTER_OPTIMIZER_AUTOAPPLY=${ENABLE_LIVE_APPLY} CLUSTER_OPTIMIZER_NUDGE_LIVE=${ENABLE_LIVE_NUDGE}"
 fi
 
 if [ "${actual_image}" != "${EXPECTED_IMAGE}" ]; then
@@ -385,6 +536,8 @@ if [ "${VERIFY_CONFIG}" = "true" ]; then
     exit "${diff_status}"
   fi
 fi
+
+report_remediation_mode
 
 if [ "${VERIFY_TARGETS_CONFIG}" != "false" ]; then
   verify_targets_config_sync
