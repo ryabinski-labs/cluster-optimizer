@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 func TestDaysBetweenInclusiveCountsUTCCalendarDays(t *testing.T) {
@@ -241,6 +246,79 @@ func TestHandleHaltRequiresConfirmAndPOST(t *testing.T) {
 	}
 }
 
+func TestReadLiveHaltRetriesTimedOutGet(t *testing.T) {
+	var requests atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			time.Sleep(30 * time.Millisecond)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cluster-optimizer-halt","namespace":"cluster-optimizer"},"data":{"halt":"true"}}`))
+	}))
+	defer api.Close()
+
+	client, err := kubernetes.NewForConfig(&rest.Config{Host: api.URL})
+	if err != nil {
+		t.Fatalf("build kubernetes client: %v", err)
+	}
+	srv := &server{kubeClient: client, haltReadTimeout: 10 * time.Millisecond}
+	result := srv.readLiveHalt(context.Background())
+	if result.err != nil {
+		t.Fatalf("readLiveHalt returned error after retry: %v", result.err)
+	}
+	if !result.active {
+		t.Fatal("readLiveHalt did not return the halt=true value from the retry")
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("request count = %d, want 2", got)
+	}
+}
+
+func TestReadLiveHaltStopsAfterTwoTimeouts(t *testing.T) {
+	var requests atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		time.Sleep(30 * time.Millisecond)
+	}))
+	defer api.Close()
+
+	client, err := kubernetes.NewForConfig(&rest.Config{Host: api.URL})
+	if err != nil {
+		t.Fatalf("build kubernetes client: %v", err)
+	}
+	srv := &server{kubeClient: client, haltReadTimeout: 10 * time.Millisecond}
+	result := srv.readLiveHalt(context.Background())
+	if result.err == nil {
+		t.Fatal("readLiveHalt returned nil error after both attempts timed out")
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("request count = %d, want 2", got)
+	}
+}
+
+func TestReadLiveHaltDoesNotRetryNonTimeoutError(t *testing.T) {
+	var requests atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer api.Close()
+
+	client, err := kubernetes.NewForConfig(&rest.Config{Host: api.URL})
+	if err != nil {
+		t.Fatalf("build kubernetes client: %v", err)
+	}
+	srv := &server{kubeClient: client, haltReadTimeout: 10 * time.Millisecond}
+	result := srv.readLiveHalt(context.Background())
+	if result.err == nil {
+		t.Fatal("readLiveHalt returned nil error for HTTP 503")
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("request count = %d, want 1", got)
+	}
+}
+
 func TestDashboardRefreshesReportsAndRelativeTimes(t *testing.T) {
 	script, err := os.ReadFile("static/app.js")
 	if err != nil {
@@ -258,6 +336,16 @@ func TestDashboardRefreshesReportsAndRelativeTimes(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard script is missing %q", want)
 		}
+	}
+}
+
+func TestOverviewActionsLabelHasValidARIARole(t *testing.T) {
+	markup, err := os.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("read dashboard markup: %v", err)
+	}
+	if !strings.Contains(string(markup), `id="overviewActions" class="overview-actions" role="group" aria-label="Current optimization actions"`) {
+		t.Fatal("overviewActions must have a role that permits its accessible label")
 	}
 }
 

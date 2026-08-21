@@ -210,7 +210,7 @@ type server struct {
 	table              string
 	region             string
 	client             *dynamodb.Client
-	kubeClient         kubernetes.Interface
+	kubeClient         *kubernetes.Clientset
 	static             http.Handler
 	remediationTargets map[string]remediationTarget
 	minRemediationDays int
@@ -241,6 +241,7 @@ type server struct {
 	// proactively invalidates so the originating tab sees the new state
 	// without waiting.
 	engineStatusCacheTTL time.Duration
+	haltReadTimeout      time.Duration
 	engineStatusMu       sync.Mutex
 	engineStatusCache    map[string]*engineStatusCacheEntry
 }
@@ -567,6 +568,17 @@ func (s *server) engineStatusFor(ctx context.Context, clusterID string) (*engine
 		}
 	}
 
+	// Start the independent Kubernetes read before DynamoDB. Doing these
+	// sequentially caused a slow GetItem to consume most of the caller's
+	// deadline, leaving the halt check to fail with context deadline exceeded.
+	var haltCh chan liveHaltResult
+	if s.kubeClient != nil {
+		haltCh = make(chan liveHaltResult, 1)
+		go func() {
+			haltCh <- s.readLiveHalt(ctx)
+		}()
+	}
+
 	loaded, err := store.LoadEngineStatus(ctx, s.client, s.table, clusterID)
 	var st *engineStatus
 	if err == nil && loaded != nil {
@@ -590,23 +602,22 @@ func (s *server) engineStatusFor(ctx context.Context, clusterID string) (*engine
 	// by the CronJob (every ~30m), so without this override an /api/halt
 	// POST would visually revert within seconds when the next /api/reports
 	// poll lands on a stale value. See QA finding HIGH-1.
-	if s.kubeClient != nil && st != nil {
-		cm, cmErr := s.kubeClient.CoreV1().ConfigMaps(haltControlNamespace).Get(ctx, haltControlConfigMap, metav1.GetOptions{})
-		switch {
-		case cmErr == nil:
-			st.HaltActive = cm.Data[haltControlKey] == "true"
-			if st.HaltActive {
-				st.HaltReason = "halt=true (live ConfigMap)"
-			} else {
-				st.HaltReason = ""
+	if haltCh != nil {
+		live := <-haltCh
+		if st != nil {
+			switch {
+			case live.err == nil:
+				st.HaltActive = live.active
+				if st.HaltActive {
+					st.HaltReason = "halt=true (live ConfigMap)"
+				} else {
+					st.HaltReason = ""
+				}
+			default:
+				// Read failure: keep the DynamoDB-reported value rather than
+				// flipping halt off on a transient kube API blip.
+				log.Printf("halt live check failed for %s: %v", clusterID, live.err)
 			}
-		case apierrors.IsNotFound(cmErr):
-			st.HaltActive = false
-			st.HaltReason = ""
-		default:
-			// Read failure: keep the DynamoDB-reported value rather than
-			// flipping halt off on a transient kube API blip.
-			log.Printf("halt live check failed for %s: %v", clusterID, cmErr)
 		}
 	}
 
@@ -619,6 +630,38 @@ func (s *server) engineStatusFor(ctx context.Context, clusterID string) (*engine
 		s.engineStatusMu.Unlock()
 	}
 	return st, err
+}
+
+type liveHaltResult struct {
+	active bool
+	err    error
+}
+
+// readLiveHalt retries the safe ConfigMap GET once. A short per-attempt
+// timeout recovers from stale keep-alive connections after laptop sleep while
+// the parent request context remains the hard upper bound.
+func (s *server) readLiveHalt(ctx context.Context) liveHaltResult {
+	timeout := s.haltReadTimeout
+	if timeout <= 0 {
+		timeout = 4 * time.Second
+	}
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+		cm, err := s.kubeClient.CoreV1().ConfigMaps(haltControlNamespace).Get(attemptCtx, haltControlConfigMap, metav1.GetOptions{})
+		cancel()
+		switch {
+		case err == nil:
+			return liveHaltResult{active: cm.Data[haltControlKey] == "true"}
+		case apierrors.IsNotFound(err):
+			return liveHaltResult{}
+		case !errors.Is(err, context.DeadlineExceeded), ctx.Err() != nil:
+			return liveHaltResult{err: err}
+		default:
+			lastErr = err
+		}
+	}
+	return liveHaltResult{err: lastErr}
 }
 
 // invalidateEngineStatus drops any cached engine_status for clusterID so the
