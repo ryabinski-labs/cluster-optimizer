@@ -2,6 +2,11 @@ package model
 
 import "time"
 
+type Namespace struct {
+	Name   string            `json:"name"`
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
 type Node struct {
 	Name                 string `json:"name"`
 	InstanceType         string `json:"instance_type,omitempty"`
@@ -121,6 +126,7 @@ type Workload struct {
 	Replicas          int32             `json:"replicas"`
 	Labels            map[string]string `json:"labels,omitempty"`
 	Selector          map[string]string `json:"selector,omitempty"`
+	Containers        []string          `json:"containers,omitempty"`
 	Images            []string          `json:"images,omitempty"`
 	RuntimeHints      []string          `json:"runtime_hints,omitempty"`
 	RequestsCPUm      int64             `json:"requests_cpu_m"`
@@ -154,11 +160,12 @@ type HPA struct {
 }
 
 type Snapshot struct {
-	ClusterID  string     `json:"cluster_id"`
-	CapturedAt time.Time  `json:"captured_at"`
-	Nodes      []Node     `json:"nodes"`
-	Pods       []Pod      `json:"pods"`
-	Workloads  []Workload `json:"workloads"`
-	PDBs       []PDB      `json:"pdbs"`
-	HPAs       []HPA      `json:"hpas"`
+	ClusterID  string      `json:"cluster_id"`
+	CapturedAt time.Time   `json:"captured_at"`
+	Namespaces []Namespace `json:"namespaces,omitempty"`
+	Nodes      []Node      `json:"nodes"`
+	Pods       []Pod       `json:"pods"`
+	Workloads  []Workload  `json:"workloads"`
+	PDBs       []PDB       `json:"pdbs"`
+	HPAs       []HPA       `json:"hpas"`
 }

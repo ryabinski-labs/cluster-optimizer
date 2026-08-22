@@ -153,13 +153,14 @@ To strip the optimizer's ability to patch workloads even if both auto-apply
 gates remain set:
 
 ```bash
-kubectl delete -f manifests/rbac-applier.yaml
+scripts/apply-rbac.sh --revoke-applier
 ```
 
-This removes the Role/RoleBinding for `patch` on Deployments/DaemonSets/
-StatefulSets in `default`, and the read access to the halt ConfigMap. The
-applier will then see RBAC-forbidden errors on its patch attempts (logged,
-non-fatal) and fail-closed on the halt check (treated as halted).
+This removes the cluster-scoped patch grant and the legacy `default`-namespace
+Role/RoleBinding from older releases. Read access to the shared halt ConfigMap
+remains in base RBAC because nudging and completed-pod cleanup also require it.
+The applier will then see RBAC-forbidden errors on patch attempts if its live
+gates are subsequently enabled without restoring the grant.
 
 ## Read the recent run logs
 

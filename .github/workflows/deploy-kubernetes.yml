@@ -100,6 +100,20 @@ jobs:
           doctl kubernetes cluster kubeconfig save "${DOKS_CLUSTER_ID}" --expiry-seconds 600
           kubectl cluster-info
 
+      - name: Validate deployment inputs
+        env:
+          ENABLE_DYNAMODB: ${{ inputs.enable_dynamodb }}
+          ENABLE_LIVE_APPLY: ${{ inputs.enable_live_apply }}
+          ENABLE_LIVE_NUDGE: ${{ inputs.enable_live_nudge }}
+          ENABLE_LIVE_GC: ${{ inputs.enable_live_gc }}
+        run: |
+          for gate in ENABLE_LIVE_APPLY ENABLE_LIVE_NUDGE ENABLE_LIVE_GC; do
+            if [ "${!gate}" = "true" ] && [ "${ENABLE_DYNAMODB}" != "true" ]; then
+              echo "${gate} requires enable_dynamodb; the stdout-only manifest cannot run live remediation safely."
+              exit 1
+            fi
+          done
+
       - name: Apply engine RBAC
         run: bash scripts/apply-rbac.sh
 
@@ -146,6 +160,16 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      - name: Configure applier RBAC
+        env:
+          ENABLE_LIVE_APPLY: ${{ inputs.enable_live_apply }}
+        run: |
+          if [ "${ENABLE_LIVE_APPLY}" = "true" ]; then
+            bash scripts/apply-rbac.sh --applier
+          else
+            bash scripts/apply-rbac.sh --revoke-applier
+          fi
+
       - name: Deploy CronJob
         env:
           ENABLE_DYNAMODB: ${{ inputs.enable_dynamodb }}
@@ -159,27 +183,6 @@ jobs:
           manifest="manifests/cronjob.yaml"
           if [ "${ENABLE_DYNAMODB}" = "true" ]; then
             manifest="examples/cronjob-dynamodb.yaml"
-          fi
-
-          # The applier refuses to mutate without DynamoDB persistence: it
-          # requires a finding to recur across 3 consecutive runs, which it
-          # cannot establish from a single stdout-only run.
-          if [ "${ENABLE_LIVE_APPLY}" = "true" ] && [ "${ENABLE_DYNAMODB}" != "true" ]; then
-            echo "enable_live_apply requires enable_dynamodb; the applier has no run history without it."
-            exit 1
-          fi
-
-          # manifests/cronjob.yaml keeps these two gates commented out, and the
-          # gate() rewrite below only changes the value of an env var that
-          # already exists. Deploying dry-run while reporting success is worse
-          # than refusing, so refuse.
-          if [ "${ENABLE_LIVE_NUDGE}" = "true" ] && [ "${ENABLE_DYNAMODB}" != "true" ]; then
-            echo "enable_live_nudge requires enable_dynamodb; manifests/cronjob.yaml has no gate to turn on."
-            exit 1
-          fi
-          if [ "${ENABLE_LIVE_GC}" = "true" ] && [ "${ENABLE_DYNAMODB}" != "true" ]; then
-            echo "enable_live_gc requires enable_dynamodb; manifests/cronjob.yaml has no gate to turn on."
-            exit 1
           fi
 
           # The manifests ship with every live gate set to "false" so that a

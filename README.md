@@ -236,8 +236,9 @@ actually lower workload requests in-cluster you must:
 
 1. Apply the extra RBAC manifest (`manifests/rbac-applier.yaml`), which grants
    only the `patch` verb on `apps/deployments`, `apps/daemonsets`, and
-   `apps/statefulsets` in the `default` namespace, plus a single-resource `get`
-   on the halt ConfigMap.
+   `apps/statefulsets` cluster-wide. The classifier and remediation targets
+   still determine which workloads may be patched; read access to the shared
+   halt ConfigMap is part of base RBAC because all mutation paths need it.
 2. Set `CLUSTER_OPTIMIZER_AUTOAPPLY=true` in the CronJob's environment.
 3. Pass `--auto-apply` in the container args.
 
@@ -686,10 +687,44 @@ nothing.
 
 Provider-managed workloads (DOKS-reconciled DaemonSets/Deployments such as
 `coredns`, `metrics-server`, `kube-proxy`, `cilium`, `csi-do-node`, and the
-entire `kube-system`, `kube-public`, `kube-node-lease`, and
-`cluster-optimizer` namespaces) are filtered out by the classifier before any
-remediation check runs. Adding entries for them in `remediation-targets.json`
-has no effect — they cannot be live-mutated or PR-remediated by this tool.
+entire `cert-manager`, `ingress-nginx`, `kube-system`, `kube-public`,
+`kube-node-lease`, and `cluster-optimizer` namespaces) are filtered out by the
+classifier before any remediation check runs. Adding entries for them in
+`remediation-targets.json` has no effect: they cannot be live-mutated or
+PR-remediated by this tool.
+
+Namespaces following conventional platform patterns (`kube-*`, `*-system`,
+and `*-operator`) receive the same protection. The applier repeats this check
+immediately before patching as defense in depth.
+
+Targets may use `"namespace": "*"` and/or `"workload": "*"`. Matching uses
+the most specific entry first, so an exact workload mapping overrides a global
+fallback. With `"container": "*"`, the planner automatically selects the
+container only when the workload has exactly one; multi-container workloads
+must have an explicit target. Namespace wildcards apply only to namespaces
+explicitly labelled `cluster-optimizer.io/remediation=enabled`; exact namespace
+targets remain an alternative explicit authorization. This enables equal
+treatment without letting newly installed cluster add-ons inherit mutation
+authority accidentally:
+
+```json
+{
+  "cluster_id": "default",
+  "namespace": "*",
+  "workload": "*",
+  "container": "*",
+  "supported_rules": [
+    "memory-request-over-provisioned",
+    "cpu-request-over-provisioned"
+  ]
+}
+```
+
+Opt an application namespace into wildcard targets with:
+
+```bash
+kubectl label namespace <name> cluster-optimizer.io/remediation=enabled
+```
 
 Workloads must be mapped before the button can become available. The file `config/remediation-targets.json` is ignored by Git to protect your private configuration and repository names. 
 

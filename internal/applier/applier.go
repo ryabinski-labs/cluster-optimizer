@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/GipsyChef/cluster-optimizer/internal/classifier"
 	"github.com/GipsyChef/cluster-optimizer/internal/plan"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -115,8 +116,24 @@ func Apply(ctx context.Context, clientset kubernetes.Interface, p plan.Plan, opt
 	}
 
 	for _, action := range p.Actions {
-		describePlan(action, live)
 		outcome := Outcome{Action: action, DryRun: !live}
+		workload := action.WorkloadKind + "/" + action.WorkloadName
+		if classifier.IsProviderManaged(action.Namespace, workload) {
+			outcome.Reason = "workload is provider-managed"
+			log.Printf("Applier: refusing protected workload %s/%s", action.Namespace, workload)
+			result.Outcomes = append(result.Outcomes, outcome)
+			continue
+		}
+		if action.RequiresNamespaceOptIn {
+			namespace, err := clientset.CoreV1().Namespaces().Get(ctx, action.Namespace, metav1.GetOptions{})
+			if err != nil || namespace.Labels[classifier.NamespaceRemediationLabel] != classifier.NamespaceRemediationValue {
+				outcome.Reason = "namespace is not opted in for wildcard remediation"
+				log.Printf("Applier: refusing wildcard action in namespace %q without %s=%s", action.Namespace, classifier.NamespaceRemediationLabel, classifier.NamespaceRemediationValue)
+				result.Outcomes = append(result.Outcomes, outcome)
+				continue
+			}
+		}
+		describePlan(action, live)
 		if !live {
 			outcome.Reason = "dry-run; set --auto-apply and CLUSTER_OPTIMIZER_AUTOAPPLY=true to apply"
 			result.Outcomes = append(result.Outcomes, outcome)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/GipsyChef/cluster-optimizer/internal/classifier"
 	"github.com/GipsyChef/cluster-optimizer/internal/plan"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -133,6 +134,60 @@ func TestApplyLiveAppliesPatch(t *testing.T) {
 	if !sawPatch {
 		t.Fatal("expected deployment patch verb")
 	}
+}
+
+func TestApplyRefusesProtectedNamespaceEvenWithLivePlan(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	action := sampleAction()
+	action.Namespace = "gatekeeper-system"
+	p := plan.Plan{Actions: []plan.PlannedAction{action}}
+	opts := NewOptions()
+	opts.AutoApply = true
+	opts.AutoApplyEnvSet = true
+	result := Apply(context.Background(), client, p, opts)
+	if len(result.Outcomes) != 1 || result.Outcomes[0].Reason != "workload is provider-managed" {
+		t.Fatalf("expected protected-workload refusal, got %#v", result.Outcomes)
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "patch" {
+			t.Fatalf("protected namespace must not be patched, got %v", action)
+		}
+	}
+}
+
+func TestApplyRechecksWildcardNamespaceOptIn(t *testing.T) {
+	action := sampleAction()
+	action.Namespace = "sendant"
+	action.RequiresNamespaceOptIn = true
+	opts := NewOptions()
+	opts.AutoApply = true
+	opts.AutoApplyEnvSet = true
+
+	t.Run("missing label", func(t *testing.T) {
+		client := fake.NewSimpleClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "sendant"}})
+		result := Apply(context.Background(), client, plan.Plan{Actions: []plan.PlannedAction{action}}, opts)
+		if len(result.Outcomes) != 1 || result.Outcomes[0].Reason != "namespace is not opted in for wildcard remediation" {
+			t.Fatalf("expected namespace opt-in refusal, got %#v", result.Outcomes)
+		}
+		for _, clientAction := range client.Actions() {
+			if clientAction.GetVerb() == "patch" {
+				t.Fatalf("unlabelled namespace must not be patched, got %v", clientAction)
+			}
+		}
+	})
+
+	t.Run("enabled label", func(t *testing.T) {
+		deployment := makeDeployment()
+		deployment.Namespace = "sendant"
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+			Name: "sendant", Labels: map[string]string{classifier.NamespaceRemediationLabel: classifier.NamespaceRemediationValue},
+		}}
+		client := fake.NewSimpleClientset(deployment, namespace)
+		result := Apply(context.Background(), client, plan.Plan{Actions: []plan.PlannedAction{action}}, opts)
+		if len(result.Outcomes) != 1 || !result.Outcomes[0].Applied {
+			t.Fatalf("expected labelled namespace action to apply, got %#v", result.Outcomes)
+		}
+	})
 }
 
 func TestApplyHaltSwitchAborts(t *testing.T) {

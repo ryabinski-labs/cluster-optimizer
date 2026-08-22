@@ -43,6 +43,9 @@ type PlannedAction struct {
 	Reason          string `json:"reason"`
 	Confidence      string `json:"confidence"`
 	OccurrenceCount int64  `json:"occurrence_count"`
+	// RequiresNamespaceOptIn makes the applier re-check the namespace label
+	// before executing an action authorized by a namespace wildcard.
+	RequiresNamespaceOptIn bool `json:"requires_namespace_opt_in,omitempty"`
 }
 
 // Plan is the full list of actions plus context about why some findings did
@@ -141,13 +144,9 @@ func Build(report analyzer.Report, snapshot model.Snapshot, c *classifier.Classi
 			plan.Skipped = append(plan.Skipped, skipped(finding, "workload is provider-managed"))
 			continue
 		}
-		target, hasTarget := c.TargetFor(finding.Namespace, finding.Workload)
-		if !hasTarget || !c.IsRemediable(finding.RuleID, finding.Namespace, finding.Workload) {
+		target, hasTarget := c.TargetForRule(finding.RuleID, finding.Namespace, finding.Workload)
+		if !hasTarget {
 			plan.Skipped = append(plan.Skipped, skipped(finding, "no remediation target supports this rule"))
-			continue
-		}
-		if target.Container == "" {
-			plan.Skipped = append(plan.Skipped, skipped(finding, "remediation target is missing container name"))
 			continue
 		}
 		if confidenceRank[finding.Confidence] < wantConf {
@@ -173,6 +172,12 @@ func Build(report analyzer.Report, snapshot model.Snapshot, c *classifier.Classi
 			plan.Skipped = append(plan.Skipped, skipped(finding, "workload not found in snapshot"))
 			continue
 		}
+		container, ok := targetContainer(target, workload)
+		if !ok {
+			plan.Skipped = append(plan.Skipped, skipped(finding, "remediation target does not identify exactly one container"))
+			continue
+		}
+		target.Container = container
 		action, ok := planRequestTrim(workload, finding, target, policy)
 		if !ok {
 			plan.Skipped = append(plan.Skipped, skipped(finding, "no safe trim available"))
@@ -187,20 +192,31 @@ func Build(report analyzer.Report, snapshot model.Snapshot, c *classifier.Classi
 	return plan
 }
 
+func targetContainer(target classifier.Target, workload model.Workload) (string, bool) {
+	if target.Container != "*" {
+		return target.Container, target.Container != ""
+	}
+	if len(workload.Containers) != 1 {
+		return "", false
+	}
+	return workload.Containers[0], true
+}
+
 func planRequestTrim(workload model.Workload, finding analyzer.Finding, target classifier.Target, policy Policy) (PlannedAction, bool) {
 	action := PlannedAction{
-		Kind:          PatchRequest,
-		Namespace:     workload.Namespace,
-		WorkloadKind:  workload.Kind,
-		WorkloadName:  workload.Name,
-		Container:     target.Container,
-		CurrentCPUm:   -1,
-		NewCPUm:       -1,
-		CurrentMemMiB: -1,
-		NewMemMiB:     -1,
-		FindingRuleID: finding.RuleID,
-		Confidence:    finding.Confidence,
-		Reason:        finding.Evidence,
+		Kind:                   PatchRequest,
+		Namespace:              workload.Namespace,
+		WorkloadKind:           workload.Kind,
+		WorkloadName:           workload.Name,
+		Container:              target.Container,
+		CurrentCPUm:            -1,
+		NewCPUm:                -1,
+		CurrentMemMiB:          -1,
+		NewMemMiB:              -1,
+		FindingRuleID:          finding.RuleID,
+		Confidence:             finding.Confidence,
+		Reason:                 finding.Evidence,
+		RequiresNamespaceOptIn: target.RequiresNamespaceOptIn,
 	}
 	replicas := int64(workload.Replicas)
 	if replicas < 1 {

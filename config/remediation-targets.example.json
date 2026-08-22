@@ -2,6 +2,16 @@
   "targets": [
     {
       "cluster_id": "default",
+      "namespace": "*",
+      "workload": "*",
+      "container": "*",
+      "supported_rules": [
+        "memory-request-over-provisioned",
+        "cpu-request-over-provisioned"
+      ]
+    },
+    {
+      "cluster_id": "default",
       "namespace": "default",
       "workload": "Deployment/your-app-api",
       "repository": "YourGitHubUsername/your-app",
