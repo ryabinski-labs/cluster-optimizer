@@ -25,15 +25,26 @@ type Target struct {
 	InstructionsPath string   `json:"instructions_path,omitempty"`
 	Container        string   `json:"container,omitempty"`
 	SupportedRules   []string `json:"supported_rules,omitempty"`
+	// RequiresNamespaceOptIn is derived when a namespace wildcard authorizes
+	// a rule. It is never read from or written to target files.
+	RequiresNamespaceOptIn bool `json:"-"`
 }
+
+const (
+	NamespaceRemediationLabel = "cluster-optimizer.io/remediation"
+	NamespaceRemediationValue = "enabled"
+)
 
 type targetsFile struct {
 	Targets []Target `json:"targets"`
 }
 
-// providerManagedNamespaces are namespaces whose contents are entirely owned
-// by the DOKS control plane. We never propose live mutation in these.
+// providerManagedNamespaces are namespaces whose contents are owned by the
+// Kubernetes platform or its cluster add-ons. We never propose live mutation
+// in these, including through wildcard remediation targets.
 var providerManagedNamespaces = map[string]bool{
+	"cert-manager":      true,
+	"ingress-nginx":     true,
 	"kube-system":       true,
 	"kube-public":       true,
 	"kube-node-lease":   true,
@@ -66,14 +77,22 @@ var providerManagedWorkloadNames = map[string]bool{
 // Classifier evaluates whether a finding is provider-managed and/or
 // remediable. Build once per run and reuse.
 type Classifier struct {
-	clusterID string
-	byKey     map[string]Target // key: cluster/namespace/Kind/name
+	clusterID          string
+	byKey              map[string]Target // key: cluster/namespace/Kind/name
+	wildcardNamespaces map[string]bool
 }
 
 // New returns a Classifier initialised with the given remediation targets.
 // Pass nil for none. Unknown clusterIDs are accepted: targets whose cluster_id
 // matches are loaded and queryable; others are ignored.
 func New(clusterID string, targets []Target) *Classifier {
+	return NewWithNamespaceLabels(clusterID, targets, nil)
+}
+
+// NewWithNamespaceLabels enables namespace wildcard targets only for
+// namespaces carrying the explicit remediation opt-in label. Exact namespace
+// targets remain explicit authorization and do not require the label.
+func NewWithNamespaceLabels(clusterID string, targets []Target, namespaceLabels map[string]map[string]string) *Classifier {
 	byKey := make(map[string]Target, len(targets))
 	for _, target := range targets {
 		if target.ClusterID != "" && target.ClusterID != clusterID {
@@ -81,7 +100,11 @@ func New(clusterID string, targets []Target) *Classifier {
 		}
 		byKey[targetKey(target.Namespace, target.Workload)] = target
 	}
-	return &Classifier{clusterID: clusterID, byKey: byKey}
+	wildcardNamespaces := make(map[string]bool, len(namespaceLabels))
+	for namespace, labels := range namespaceLabels {
+		wildcardNamespaces[namespace] = labels[NamespaceRemediationLabel] == NamespaceRemediationValue
+	}
+	return &Classifier{clusterID: clusterID, byKey: byKey, wildcardNamespaces: wildcardNamespaces}
 }
 
 // LoadTargets reads a targets file from disk and returns its entries. A
@@ -102,10 +125,20 @@ func LoadTargets(path string) ([]Target, error) {
 }
 
 // IsProviderManaged reports whether the given namespace/workload pair points
-// at a DOKS-controlled resource. workload is "Kind/name" as emitted by the
-// analyzer; an empty workload (cluster-scoped finding) returns false.
+// at a platform-controlled resource. workload is "Kind/name" as emitted by
+// the analyzer.
 func (c *Classifier) IsProviderManaged(namespace, workload string) bool {
-	if providerManagedNamespaces[namespace] {
+	return IsProviderManaged(namespace, workload)
+}
+
+// IsProviderManaged is the package-level safety check used by both planning
+// and execution. Keeping the applier on the same deny rules provides a second
+// guard if a malformed or externally constructed plan bypasses classification.
+func IsProviderManaged(namespace, workload string) bool {
+	if providerManagedNamespaces[namespace] ||
+		strings.HasPrefix(namespace, "kube-") ||
+		strings.HasSuffix(namespace, "-system") ||
+		strings.HasSuffix(namespace, "-operator") {
 		return true
 	}
 	_, name, ok := splitWorkload(workload)
@@ -119,24 +152,71 @@ func (c *Classifier) IsProviderManaged(namespace, workload string) bool {
 // workload that supports the given rule. Used by the planner to decide
 // whether a PR-gated or live action is even applicable.
 func (c *Classifier) IsRemediable(ruleID, namespace, workload string) bool {
-	target, ok := c.TargetFor(namespace, workload)
-	if !ok {
-		return false
-	}
-	for _, supported := range target.SupportedRules {
-		if supported == ruleID {
-			return true
-		}
-	}
-	return false
+	_, ok := c.TargetForRule(ruleID, namespace, workload)
+	return ok
 }
 
-// TargetFor returns the remediation target entry for a workload, if one
-// exists. Callers use this to find the container name and repo for PR
-// generation.
+// TargetFor returns the most specific remediation target for a workload.
+// Exact mappings win over namespace or workload wildcards, and the global
+// */* target is the final fallback.
 func (c *Classifier) TargetFor(namespace, workload string) (Target, bool) {
-	target, ok := c.byKey[targetKey(namespace, workload)]
-	return target, ok
+	return c.effectiveTarget("", namespace, workload)
+}
+
+// TargetForRule resolves one effective target. More-specific metadata wins,
+// while less-specific wildcard entries provide defaults and supported rules.
+func (c *Classifier) TargetForRule(ruleID, namespace, workload string) (Target, bool) {
+	return c.effectiveTarget(ruleID, namespace, workload)
+}
+
+func (c *Classifier) effectiveTarget(ruleID, namespace, workload string) (Target, bool) {
+	keys := []string{
+		targetKey(namespace, workload),
+		targetKey(namespace, "*"),
+	}
+	if c.wildcardNamespaces[namespace] {
+		keys = append(keys, targetKey("*", workload), targetKey("*", "*"))
+	}
+	var effective Target
+	found := false
+	ruleSupported := ruleID == ""
+	for _, key := range keys {
+		target, ok := c.byKey[key]
+		if !ok {
+			continue
+		}
+		if !found {
+			effective = target
+			found = true
+		} else {
+			effective = mergeTargetDefaults(effective, target)
+		}
+		for _, supported := range target.SupportedRules {
+			if supported == ruleID && !ruleSupported {
+				ruleSupported = true
+				if target.Namespace == "*" {
+					effective.RequiresNamespaceOptIn = true
+				}
+			}
+		}
+	}
+	return effective, found && ruleSupported
+}
+
+func mergeTargetDefaults(target, defaults Target) Target {
+	if target.Repository == "" {
+		target.Repository = defaults.Repository
+	}
+	if target.ManifestPath == "" {
+		target.ManifestPath = defaults.ManifestPath
+	}
+	if target.InstructionsPath == "" {
+		target.InstructionsPath = defaults.InstructionsPath
+	}
+	if target.Container == "" {
+		target.Container = defaults.Container
+	}
+	return target
 }
 
 func targetKey(namespace, workload string) string {

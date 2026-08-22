@@ -20,6 +20,7 @@ func buildSnapshot(usageMem int64) model.Snapshot {
 		Workloads: []model.Workload{{
 			Namespace: "default", Name: "api", Kind: "Deployment", Replicas: 1,
 			Labels: map[string]string{"app": "api"}, Selector: map[string]string{"app": "api"},
+			Containers:   []string{"api"},
 			RequestsCPUm: 200, RequestsMemoryMiB: 512, UsageMemoryMiB: &mem,
 		}},
 	}
@@ -204,6 +205,62 @@ func TestBuildSkipsWhenNoTrimAvailable(t *testing.T) {
 	}
 	if len(plan.Skipped) != 1 || plan.Skipped[0].Reason != "no safe trim available" {
 		t.Fatalf("expected no-safe-trim skip, got %#v", plan.Skipped)
+	}
+}
+
+func TestBuildWildcardTargetInfersSingleContainerAcrossNamespaces(t *testing.T) {
+	snapshot := buildSnapshot(50)
+	snapshot.Workloads[0].Namespace = "sendant"
+	c := classifier.NewWithNamespaceLabels("default", []classifier.Target{
+		{ClusterID: "default", Namespace: "*", Workload: "*", Container: "*",
+			SupportedRules: []string{"memory-request-over-provisioned"}},
+		{ClusterID: "default", Namespace: "sendant", Workload: "Deployment/api",
+			SupportedRules: []string{"runtime-modernization-candidate"}},
+	}, map[string]map[string]string{"sendant": {classifier.NamespaceRemediationLabel: classifier.NamespaceRemediationValue}})
+	finding := analyzer.Finding{
+		RuleID: "memory-request-over-provisioned", Namespace: "sendant",
+		Workload: "Deployment/api", Confidence: "high",
+	}
+	plan := Build(analyzer.Report{Findings: []analyzer.Finding{finding}}, snapshot, c, DefaultPolicy(),
+		map[string]int64{occurrenceKey(finding): 5})
+	if len(plan.Actions) != 1 || plan.Actions[0].Container != "api" || !plan.Actions[0].RequiresNamespaceOptIn {
+		t.Fatalf("expected wildcard action for inferred api container, got actions=%#v skipped=%#v", plan.Actions, plan.Skipped)
+	}
+}
+
+func TestBuildWildcardTargetRefusesMultiContainerWorkload(t *testing.T) {
+	snapshot := buildSnapshot(50)
+	snapshot.Workloads[0].Containers = []string{"api", "sidecar"}
+	c := classifier.NewWithNamespaceLabels("default", []classifier.Target{{
+		ClusterID: "default", Namespace: "*", Workload: "*", Container: "*",
+		SupportedRules: []string{"memory-request-over-provisioned"},
+	}}, map[string]map[string]string{"default": {classifier.NamespaceRemediationLabel: classifier.NamespaceRemediationValue}})
+	finding := analyzer.Finding{
+		RuleID: "memory-request-over-provisioned", Namespace: "default",
+		Workload: "Deployment/api", Confidence: "high",
+	}
+	plan := Build(analyzer.Report{Findings: []analyzer.Finding{finding}}, snapshot, c, DefaultPolicy(),
+		map[string]int64{occurrenceKey(finding): 5})
+	if len(plan.Actions) != 0 || len(plan.Skipped) != 1 || plan.Skipped[0].Reason != "remediation target does not identify exactly one container" {
+		t.Fatalf("expected ambiguous-container skip, got actions=%#v skipped=%#v", plan.Actions, plan.Skipped)
+	}
+}
+
+func TestBuildWildcardTargetRequiresNamespaceOptIn(t *testing.T) {
+	snapshot := buildSnapshot(50)
+	snapshot.Workloads[0].Namespace = "monitoring"
+	c := classifier.NewWithNamespaceLabels("default", []classifier.Target{{
+		ClusterID: "default", Namespace: "*", Workload: "*", Container: "*",
+		SupportedRules: []string{"memory-request-over-provisioned"},
+	}}, map[string]map[string]string{"monitoring": {}})
+	finding := analyzer.Finding{
+		RuleID: "memory-request-over-provisioned", Namespace: "monitoring",
+		Workload: "Deployment/api", Confidence: "high",
+	}
+	plan := Build(analyzer.Report{Findings: []analyzer.Finding{finding}}, snapshot, c, DefaultPolicy(),
+		map[string]int64{occurrenceKey(finding): 5})
+	if len(plan.Actions) != 0 || len(plan.Skipped) != 1 || plan.Skipped[0].Reason != "no remediation target supports this rule" {
+		t.Fatalf("expected unlabelled namespace skip, got actions=%#v skipped=%#v", plan.Actions, plan.Skipped)
 	}
 }
 

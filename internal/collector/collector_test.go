@@ -1,6 +1,13 @@
 package collector
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+)
 
 func TestParseNodeFsStats(t *testing.T) {
 	// Trimmed kubelet stats/summary payload (the shape DOKS returns).
@@ -43,5 +50,25 @@ func TestParseNodeFsStatsMissingFieldsAreZero(t *testing.T) {
 func TestParseNodeFsStatsInvalidJSON(t *testing.T) {
 	if _, _, _, err := parseNodeFsStats([]byte("not json")); err == nil {
 		t.Fatal("expected error on invalid JSON")
+	}
+}
+
+func TestContainerNamesAreStableAndUnique(t *testing.T) {
+	got := containerNames([]corev1.Container{{Name: "sidecar"}, {Name: "api"}, {Name: "api"}})
+	if len(got) != 2 || got[0] != "api" || got[1] != "sidecar" {
+		t.Fatalf("unexpected container names: %#v", got)
+	}
+}
+
+func TestCollectNamespacesPreservesRemediationLabels(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: "sendant", Labels: map[string]string{"cluster-optimizer.io/remediation": "enabled"},
+	}})
+	namespaces, err := collectNamespaces(context.Background(), client)
+	if err != nil {
+		t.Fatalf("collectNamespaces: %v", err)
+	}
+	if len(namespaces) != 1 || namespaces[0].Name != "sendant" || namespaces[0].Labels["cluster-optimizer.io/remediation"] != "enabled" {
+		t.Fatalf("unexpected namespaces: %#v", namespaces)
 	}
 }

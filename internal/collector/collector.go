@@ -47,6 +47,10 @@ func Collect(ctx context.Context, clusterID string) (model.Snapshot, error) {
 		return model.Snapshot{}, err
 	}
 
+	namespaces, err := collectNamespaces(ctx, clientset)
+	if err != nil {
+		return model.Snapshot{}, err
+	}
 	podUsage := collectPodMetrics(ctx, dynamicClient)
 	nodes, err := collectNodes(ctx, clientset)
 	if err != nil {
@@ -72,12 +76,25 @@ func Collect(ctx context.Context, clusterID string) (model.Snapshot, error) {
 	return model.Snapshot{
 		ClusterID:  clusterID,
 		CapturedAt: time.Now().UTC(),
+		Namespaces: namespaces,
 		Nodes:      nodes,
 		Pods:       pods,
 		Workloads:  workloads,
 		PDBs:       pdbs,
 		HPAs:       hpas,
 	}, nil
+}
+
+func collectNamespaces(ctx context.Context, clientset kubernetes.Interface) ([]model.Namespace, error) {
+	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]model.Namespace, 0, len(namespaces.Items))
+	for _, namespace := range namespaces.Items {
+		result = append(result, model.Namespace{Name: namespace.Name, Labels: namespace.Labels})
+	}
+	return result, nil
 }
 
 func kubeConfig() (*rest.Config, error) {
@@ -265,23 +282,23 @@ func collectWorkloads(ctx context.Context, clientset *kubernetes.Clientset, pods
 		return nil, err
 	}
 	for _, item := range statefulSets.Items {
-		workloads = append(workloads, workloadModel("StatefulSet", item.Namespace, item.Name, item.Status.ReadyReplicas, item.Spec.Template.Labels, item.Spec.Selector.MatchLabels, byOwner[key(item.Namespace, "StatefulSet", item.Name)]))
+		workloads = append(workloads, workloadModel("StatefulSet", item.Namespace, item.Name, item.Status.ReadyReplicas, item.Spec.Template.Labels, item.Spec.Selector.MatchLabels, containerNames(item.Spec.Template.Spec.Containers), byOwner[key(item.Namespace, "StatefulSet", item.Name)]))
 	}
 	daemonSets, err := clientset.AppsV1().DaemonSets(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
 	for _, item := range daemonSets.Items {
-		workloads = append(workloads, workloadModel("DaemonSet", item.Namespace, item.Name, item.Status.NumberReady, item.Spec.Template.Labels, item.Spec.Selector.MatchLabels, byOwner[key(item.Namespace, "DaemonSet", item.Name)]))
+		workloads = append(workloads, workloadModel("DaemonSet", item.Namespace, item.Name, item.Status.NumberReady, item.Spec.Template.Labels, item.Spec.Selector.MatchLabels, containerNames(item.Spec.Template.Spec.Containers), byOwner[key(item.Namespace, "DaemonSet", item.Name)]))
 	}
 	return workloads, nil
 }
 
 func deploymentModel(item appsv1.Deployment, aggregates map[string]podAggregate) model.Workload {
-	return workloadModel("Deployment", item.Namespace, item.Name, item.Status.ReadyReplicas, item.Spec.Template.Labels, item.Spec.Selector.MatchLabels, aggregates[key(item.Namespace, "ReplicaSet", item.Name)])
+	return workloadModel("Deployment", item.Namespace, item.Name, item.Status.ReadyReplicas, item.Spec.Template.Labels, item.Spec.Selector.MatchLabels, containerNames(item.Spec.Template.Spec.Containers), aggregates[key(item.Namespace, "ReplicaSet", item.Name)])
 }
 
-func workloadModel(kind, namespace, name string, replicas int32, labels, selector map[string]string, aggregate podAggregate) model.Workload {
+func workloadModel(kind, namespace, name string, replicas int32, labels, selector map[string]string, containers []string, aggregate podAggregate) model.Workload {
 	return model.Workload{
 		Namespace:         namespace,
 		Name:              name,
@@ -289,6 +306,7 @@ func workloadModel(kind, namespace, name string, replicas int32, labels, selecto
 		Replicas:          replicas,
 		Labels:            labels,
 		Selector:          selector,
+		Containers:        containers,
 		Images:            aggregate.images,
 		RuntimeHints:      runtimeHints(aggregate.images, labels),
 		RequestsCPUm:      aggregate.requestsCPU,
@@ -298,6 +316,14 @@ func workloadModel(kind, namespace, name string, replicas int32, labels, selecto
 		UsageCPUm:         aggregate.usageCPU,
 		UsageMemoryMiB:    aggregate.usageMem,
 	}
+}
+
+func containerNames(containers []corev1.Container) []string {
+	names := make([]string, 0, len(containers))
+	for _, container := range containers {
+		names = append(names, container.Name)
+	}
+	return uniqueStrings(names)
 }
 
 func collectPDBs(ctx context.Context, clientset *kubernetes.Clientset) ([]model.PDB, error) {

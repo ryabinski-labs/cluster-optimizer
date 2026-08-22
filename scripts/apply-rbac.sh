@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/apply-rbac.sh [--dry-run] [--applier]
+Usage: scripts/apply-rbac.sh [--dry-run] [--applier | --revoke-applier]
 
 Applies manifests/rbac.yaml (Namespace, ServiceAccount, ClusterRole, and
 ClusterRoleBinding) to the cluster your kubectl is pointed at. This grants the
@@ -12,12 +12,12 @@ cluster-optimizer ServiceAccount the permissions the engine needs, including
 
 With --applier it also applies manifests/rbac-applier.yaml, which grants the
 narrow patch permissions the live applier needs (apps deployments/daemonsets/
-statefulsets in the `default` namespace, plus get on the halt ConfigMap).
+statefulsets selected by remediation targets).
 Live apply is gated separately by --auto-apply AND
 CLUSTER_OPTIMIZER_AUTOAPPLY=true (see scripts/deploy-kubernetes.sh
 --live-apply); this only grants the verbs, it does not turn anything on.
 Without it, a cluster deployed with --live-apply 403s on every patch.
-Revoke with: kubectl delete -f manifests/rbac-applier.yaml
+Revoke with: scripts/apply-rbac.sh --revoke-applier
 
 Run this whenever scripts/verify-deployment.sh reports the ServiceAccount is
 missing a permission (RBAC drift), e.g.:
@@ -41,13 +41,16 @@ Environment overrides:
 Flags:
   --dry-run      Show what would be applied and removed without changing
                  anything. Safe to run with any kubeconfig.
-  --applier      Also apply the live-applier Role/RoleBinding.
+  --applier      Also apply the live-applier ClusterRole/ClusterRoleBinding.
+  --revoke-applier
+                 Remove both current and legacy live-applier RBAC objects.
   --help, -h     Show this message.
 
 Examples:
   scripts/apply-rbac.sh --dry-run
   scripts/apply-rbac.sh
   scripts/apply-rbac.sh --applier
+  scripts/apply-rbac.sh --revoke-applier
 EOF
 }
 
@@ -77,6 +80,7 @@ resolve_local_path() {
 
 DRY_RUN=false
 WITH_APPLIER=false
+REVOKE_APPLIER=false
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
@@ -94,6 +98,10 @@ while [ "$#" -gt 0 ]; do
       WITH_APPLIER=true
       shift
       ;;
+    --revoke-applier)
+      REVOKE_APPLIER=true
+      shift
+      ;;
     *)
       echo "error: unknown argument: $1" >&2
       usage >&2
@@ -101,6 +109,11 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "${WITH_APPLIER}" = "true" ] && [ "${REVOKE_APPLIER}" = "true" ]; then
+  echo "error: --applier and --revoke-applier are mutually exclusive" >&2
+  exit 2
+fi
 
 KUBECTL="${KUBECTL:-kubectl}"
 MANIFEST="${MANIFEST:-manifests/rbac.yaml}"
@@ -115,7 +128,7 @@ if [ ! -f "${MANIFEST}" ]; then
   exit 1
 fi
 
-if [ "${WITH_APPLIER}" = "true" ]; then
+if [ "${WITH_APPLIER}" = "true" ] || [ "${REVOKE_APPLIER}" = "true" ]; then
   APPLIER_MANIFEST="$(resolve_local_path "${APPLIER_MANIFEST}")"
   if [ ! -f "${APPLIER_MANIFEST}" ]; then
     echo "error: applier RBAC manifest not found: ${APPLIER_MANIFEST}" >&2
@@ -124,11 +137,22 @@ if [ "${WITH_APPLIER}" = "true" ]; then
 fi
 
 if [ "${DRY_RUN}" = "true" ]; then
+  if [ "${REVOKE_APPLIER}" = "true" ]; then
+    echo "# dry-run: would remove current and legacy applier RBAC"
+    "${KUBECTL}" delete -f "${APPLIER_MANIFEST}" --ignore-not-found --dry-run=client
+    "${KUBECTL}" delete rolebinding cluster-optimizer-applier -n default --ignore-not-found --dry-run=client
+    "${KUBECTL}" delete role cluster-optimizer-applier -n default --ignore-not-found --dry-run=client
+    echo "# dry-run: nothing was removed." >&2
+    exit 0
+  fi
   echo "# dry-run: would apply ${MANIFEST}"
   "${KUBECTL}" apply -f "${MANIFEST}" --dry-run=client
   if [ "${WITH_APPLIER}" = "true" ]; then
     echo "# dry-run: would apply ${APPLIER_MANIFEST}"
     "${KUBECTL}" apply -f "${APPLIER_MANIFEST}" --dry-run=client
+    echo "# dry-run: would remove legacy default-namespace applier objects" >&2
+    "${KUBECTL}" delete rolebinding cluster-optimizer-applier -n default --ignore-not-found --dry-run=client
+    "${KUBECTL}" delete role cluster-optimizer-applier -n default --ignore-not-found --dry-run=client
   fi
   echo "# dry-run: would remove legacy objects (if present):" >&2
   echo "#   clusterrolebinding/${LEGACY_ROLE}" >&2
@@ -137,10 +161,22 @@ if [ "${DRY_RUN}" = "true" ]; then
   exit 0
 fi
 
+if [ "${REVOKE_APPLIER}" = "true" ]; then
+  "${KUBECTL}" delete -f "${APPLIER_MANIFEST}" --ignore-not-found
+  "${KUBECTL}" delete rolebinding cluster-optimizer-applier -n default --ignore-not-found
+  "${KUBECTL}" delete role cluster-optimizer-applier -n default --ignore-not-found
+  echo "Applier RBAC revoked, including legacy default-namespace objects."
+  exit 0
+fi
+
 "${KUBECTL}" apply -f "${MANIFEST}"
 
 if [ "${WITH_APPLIER}" = "true" ]; then
   "${KUBECTL}" apply -f "${APPLIER_MANIFEST}"
+  # The applier grant used to be a Role/RoleBinding in default. Remove those
+  # obsolete namespaced objects after the cluster-scoped replacement exists.
+  "${KUBECTL}" delete rolebinding cluster-optimizer-applier -n default --ignore-not-found
+  "${KUBECTL}" delete role cluster-optimizer-applier -n default --ignore-not-found
 fi
 
 # Remove the pre-rename objects so the renamed role does not leave an orphan

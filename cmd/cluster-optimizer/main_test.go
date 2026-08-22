@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/GipsyChef/cluster-optimizer/internal/applier"
+	"github.com/GipsyChef/cluster-optimizer/internal/classifier"
 	"github.com/GipsyChef/cluster-optimizer/internal/nudger"
 	"github.com/GipsyChef/cluster-optimizer/internal/plan"
 	"github.com/GipsyChef/cluster-optimizer/internal/podgc"
@@ -154,5 +155,35 @@ func TestPodGCEventPreservesHaltReason(t *testing.T) {
 	}
 	if !event.HaltActive || event.Reason != "halt=true" {
 		t.Errorf("expected halt fields set, got %+v", event)
+	}
+}
+
+func TestSkipperEventsWildcardTargetsOnlyApplicationWorkloads(t *testing.T) {
+	ts := time.Now()
+	cls := classifier.NewWithNamespaceLabels("default", []classifier.Target{{
+		ClusterID: "default", Namespace: "*", Workload: "*", Container: "*",
+		SupportedRules: []string{"memory-request-over-provisioned"},
+	}}, map[string]map[string]string{"sendant": {classifier.NamespaceRemediationLabel: classifier.NamespaceRemediationValue}})
+	skips := []plan.SkippedReason{
+		{RuleID: "memory-request-over-provisioned", Namespace: "sendant", Workload: "Deployment/bootstrapd", Reason: "low confidence"},
+		{RuleID: "memory-request-over-provisioned", Namespace: "gatekeeper-system", Workload: "Deployment/controller", Reason: "provider managed"},
+		{RuleID: "memory-request-over-provisioned", Namespace: "default", Workload: "DaemonSet/cilium", Reason: "provider managed"},
+	}
+	events := skipperEvents(skips, ts, cls)
+	if len(events) != 1 || events[0].Namespace != "sendant" || events[0].Workload != "Deployment/bootstrapd" {
+		t.Fatalf("expected only application skip event, got %#v", events)
+	}
+	if events := skipperEvents(skips, ts, nil); len(events) != 0 {
+		t.Fatalf("nil classifier must emit no skip events, got %#v", events)
+	}
+}
+
+func TestSkipperEventsOmitUntargetedWorkload(t *testing.T) {
+	cls := classifier.New("default", nil)
+	events := skipperEvents([]plan.SkippedReason{{
+		RuleID: "memory-request-over-provisioned", Namespace: "sendant", Workload: "Deployment/bootstrapd",
+	}}, time.Now(), cls)
+	if len(events) != 0 {
+		t.Fatalf("untargeted workload must emit no skip events, got %#v", events)
 	}
 }

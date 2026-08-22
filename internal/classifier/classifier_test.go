@@ -95,3 +95,106 @@ func TestTargetForReturnsCopy(t *testing.T) {
 		t.Fatalf("unexpected container: %q", target.Container)
 	}
 }
+
+func TestTargetForUsesGlobalWildcard(t *testing.T) {
+	c := NewWithNamespaceLabels("default", []Target{{
+		ClusterID: "default", Namespace: "*", Workload: "*", Container: "*",
+		SupportedRules: []string{"memory-request-over-provisioned"},
+	}}, map[string]map[string]string{
+		"sendant": {NamespaceRemediationLabel: NamespaceRemediationValue},
+		"steada":  {NamespaceRemediationLabel: NamespaceRemediationValue},
+	})
+	target, ok := c.TargetFor("sendant", "Deployment/bootstrapd")
+	if !ok || target.Container != "*" {
+		t.Fatalf("expected global wildcard target, got %#v, %v", target, ok)
+	}
+	if !c.IsRemediable("memory-request-over-provisioned", "steada", "StatefulSet/cache") {
+		t.Fatal("global wildcard should cover workloads in every application namespace")
+	}
+}
+
+func TestTargetForPrefersExactTargetOverWildcard(t *testing.T) {
+	c := New("default", []Target{
+		{ClusterID: "default", Namespace: "*", Workload: "*", Container: "*"},
+		{ClusterID: "default", Namespace: "sendant", Workload: "Deployment/bootstrapd", Container: "bootstrapd"},
+	})
+	target, ok := c.TargetFor("sendant", "Deployment/bootstrapd")
+	if !ok || target.Container != "bootstrapd" {
+		t.Fatalf("expected exact target, got %#v, %v", target, ok)
+	}
+}
+
+func TestPlatformNamespacesRemainProviderManagedWithWildcard(t *testing.T) {
+	c := New("default", []Target{{
+		ClusterID: "default", Namespace: "*", Workload: "*", Container: "*",
+		SupportedRules: []string{"memory-request-over-provisioned"},
+	}})
+	for _, namespace := range []string{"cert-manager", "ingress-nginx", "kube-system", "cluster-optimizer", "gatekeeper-system", "tigera-operator"} {
+		if !c.IsProviderManaged(namespace, "Deployment/controller") {
+			t.Errorf("namespace %q should remain provider managed", namespace)
+		}
+	}
+}
+
+func TestWildcardRulesActAsDefaultsForExactTargets(t *testing.T) {
+	c := NewWithNamespaceLabels("default", []Target{
+		{ClusterID: "default", Namespace: "*", Workload: "*", Container: "*",
+			SupportedRules: []string{"memory-request-over-provisioned"}},
+		{ClusterID: "default", Namespace: "sendant", Workload: "Deployment/bootstrapd", Container: "bootstrapd",
+			SupportedRules: []string{"cpu-request-over-provisioned"}},
+	}, map[string]map[string]string{"sendant": {NamespaceRemediationLabel: NamespaceRemediationValue}})
+	if !c.IsRemediable("memory-request-over-provisioned", "sendant", "Deployment/bootstrapd") {
+		t.Fatal("global wildcard rule should remain enabled when an exact target omits it")
+	}
+	if !c.IsRemediable("cpu-request-over-provisioned", "sendant", "Deployment/bootstrapd") {
+		t.Fatal("exact target rule should remain enabled")
+	}
+	target, ok := c.TargetFor("sendant", "Deployment/bootstrapd")
+	if !ok || target.Container != "bootstrapd" {
+		t.Fatalf("exact target metadata should still win, got %#v, %v", target, ok)
+	}
+}
+
+func TestWildcardRequiresNamespaceOptIn(t *testing.T) {
+	targets := []Target{{
+		ClusterID: "default", Namespace: "*", Workload: "*", Container: "*",
+		SupportedRules: []string{"memory-request-over-provisioned"},
+	}}
+	c := NewWithNamespaceLabels("default", targets, map[string]map[string]string{
+		"monitoring": {},
+		"sendant":    {NamespaceRemediationLabel: NamespaceRemediationValue},
+	})
+	if _, ok := c.TargetFor("monitoring", "Deployment/prometheus"); ok {
+		t.Fatal("unlabelled namespace must not match a namespace wildcard")
+	}
+	target, ok := c.TargetForRule("memory-request-over-provisioned", "sendant", "Deployment/bootstrapd")
+	if !ok || !target.RequiresNamespaceOptIn {
+		t.Fatalf("labelled namespace should resolve wildcard with recheck required, got %#v, %v", target, ok)
+	}
+}
+
+func TestExactTargetDoesNotRequireNamespaceOptIn(t *testing.T) {
+	c := NewWithNamespaceLabels("default", []Target{
+		{ClusterID: "default", Namespace: "*", Workload: "*", Container: "*",
+			SupportedRules: []string{"memory-request-over-provisioned"}},
+		{ClusterID: "default", Namespace: "sendant", Workload: "Deployment/bootstrapd", Container: "bootstrapd",
+			SupportedRules: []string{"memory-request-over-provisioned"}},
+	}, map[string]map[string]string{"sendant": {NamespaceRemediationLabel: NamespaceRemediationValue}})
+	target, ok := c.TargetForRule("memory-request-over-provisioned", "sendant", "Deployment/bootstrapd")
+	if !ok || target.RequiresNamespaceOptIn {
+		t.Fatalf("exact rule authorization should not require wildcard opt-in recheck, got %#v, %v", target, ok)
+	}
+}
+
+func TestWildcardDefaultsFillContainerlessExactTarget(t *testing.T) {
+	c := NewWithNamespaceLabels("default", []Target{
+		{ClusterID: "default", Namespace: "*", Workload: "*", Container: "*",
+			SupportedRules: []string{"memory-request-over-provisioned"}},
+		{ClusterID: "default", Namespace: "sendant", Workload: "Deployment/bootstrapd",
+			SupportedRules: []string{"runtime-modernization-candidate"}},
+	}, map[string]map[string]string{"sendant": {NamespaceRemediationLabel: NamespaceRemediationValue}})
+	target, ok := c.TargetForRule("memory-request-over-provisioned", "sendant", "Deployment/bootstrapd")
+	if !ok || target.Container != "*" || !target.RequiresNamespaceOptIn {
+		t.Fatalf("expected merged wildcard defaults, got %#v, %v", target, ok)
+	}
+}

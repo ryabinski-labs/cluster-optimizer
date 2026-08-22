@@ -15,6 +15,7 @@ import (
 	"github.com/GipsyChef/cluster-optimizer/internal/capacity"
 	"github.com/GipsyChef/cluster-optimizer/internal/classifier"
 	"github.com/GipsyChef/cluster-optimizer/internal/collector"
+	"github.com/GipsyChef/cluster-optimizer/internal/model"
 	"github.com/GipsyChef/cluster-optimizer/internal/nudger"
 	"github.com/GipsyChef/cluster-optimizer/internal/plan"
 	"github.com/GipsyChef/cluster-optimizer/internal/podgc"
@@ -76,12 +77,11 @@ func run(ctx context.Context, args []string) error {
 		// prevent the advisory run, but it does prevent any remediation.
 		fmt.Fprintf(os.Stderr, "cluster-optimizer: failed to load targets at %q: %v\n", targetsPath, err)
 	}
-	cls := classifier.New(clusterID, targets)
-
 	snapshot, err := collector.Collect(ctx, clusterID)
 	if err != nil {
 		return err
 	}
+	cls := classifier.NewWithNamespaceLabels(clusterID, targets, namespaceLabels(snapshot.Namespaces))
 	// Usage evidence is resolved before analysis so the capacity search sizes
 	// each pod by the more demanding of its request and its observed p95.
 	// Resolve never fails: it degrades to a weaker source and records why, so
@@ -267,6 +267,14 @@ func run(ctx context.Context, args []string) error {
 	return nil
 }
 
+func namespaceLabels(namespaces []model.Namespace) map[string]map[string]string {
+	labels := make(map[string]map[string]string, len(namespaces))
+	for _, namespace := range namespaces {
+		labels[namespace.Name] = namespace.Labels
+	}
+	return labels
+}
+
 // skipperEvents converts planner SkippedReasons into RemediationEvents the UI
 // can render. We only emit skips for workloads in the remediation allowlist
 // to avoid flooding the feed: every CronJob tick would otherwise emit a skip
@@ -275,6 +283,9 @@ func skipperEvents(skipped []plan.SkippedReason, ts time.Time, cls *classifier.C
 	events := make([]store.RemediationEvent, 0, len(skipped))
 	for _, skip := range skipped {
 		if cls == nil {
+			continue
+		}
+		if cls.IsProviderManaged(skip.Namespace, skip.Workload) {
 			continue
 		}
 		if _, hasTarget := cls.TargetFor(skip.Namespace, skip.Workload); !hasTarget {

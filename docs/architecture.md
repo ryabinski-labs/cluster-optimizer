@@ -102,7 +102,7 @@ mutation requires two independent gates AND a halt-ConfigMap check.
 | Risk | Severity | Mitigation |
 |---|---|---|
 | Live trim causes OOMKill or throttling under burst | High | Live applier requires `confidence=high` + ≥3-run agreement + DynamoDB persistence + 50% max-trim cap per pass + 10m/32Mi floor + 1-workload-per-tick budget; dry-run is default |
-| Operator mistakenly patches a DOKS-managed resource | High | Hardcoded provider-managed namespace + workload-name list in classifier; planner refuses to emit actions for them; PR remediator also refuses |
+| Operator mistakenly patches a platform-managed resource | High | Exact targets are explicit; namespace wildcards require `cluster-optimizer.io/remediation=enabled`; protected namespace/name checks run in both planner and applier; PR remediator also refuses protected workloads |
 | One short metrics sample can mislead sizing | High | Mark confidence, recommend multi-day p95/p99 validation; the capacity engine additionally refuses to mark any verdict actionable unless the usage fidelity spans time (`historical_p95`, `recommender`, `sampled_rollup`) |
 | Placement simulator disagrees with the real scheduler and a "removable" node is not | High | Only hard predicates are modelled and only in the pessimistic direction: soft terms are ignored (they cannot block), unmodelled required constraints force the pool to `indeterminate`, and FFD's suboptimality can only under-report what fits. Enforcement additionally verifies each drain rather than trusting the projection |
 | Cluster-average capacity math misdescribes heterogeneous pools | Medium | Capacity is evaluated per node pool, keyed off provider pool labels with an instance-type fallback |

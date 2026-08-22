@@ -13,9 +13,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   # Renamed from cluster-optimizer-readonly: the role is no longer read-only
-  # (it grants update nodes, create pods/eviction, delete pods, and patch
-  # workloads for the opt-in remediation paths). scripts/apply-rbac.sh removes
-  # the old objects so a renamed apply does not orphan them.
+  # (it grants update nodes, create pods/eviction, and delete pods for opt-in
+  # remediation paths). Workload patching remains in rbac-applier.yaml.
+  # scripts/apply-rbac.sh removes the old objects after the rename.
   name: cluster-optimizer-engine
 rules:
   - apiGroups: [""]
@@ -36,7 +36,7 @@ rules:
     resources: ["nodes/proxy"]
     verbs: ["get"]
   - apiGroups: [""]
-    resources: ["services", "persistentvolumes", "persistentvolumeclaims", "events"]
+    resources: ["namespaces", "services", "persistentvolumes", "persistentvolumeclaims", "events"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
@@ -69,4 +69,31 @@ subjects:
   - kind: ServiceAccount
     name: cluster-optimizer
     namespace: cluster-optimizer
-
+---
+# Every live mutation path reads the shared halt switch. Keep this base grant
+# separate from optional workload-patch authority so disabling the applier does
+# not disable safe halt checks for nudging or completed-pod cleanup.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cluster-optimizer-halt-reader
+  namespace: cluster-optimizer
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["cluster-optimizer-halt"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cluster-optimizer-halt-reader
+  namespace: cluster-optimizer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cluster-optimizer-halt-reader
+subjects:
+  - kind: ServiceAccount
+    name: cluster-optimizer
+    namespace: cluster-optimizer
