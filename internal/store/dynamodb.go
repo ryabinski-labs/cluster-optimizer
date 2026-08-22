@@ -21,6 +21,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
+// DynamoDBHTTPClientTimeout is the hard ceiling for a single HTTP request.
+// Callers should keep operation deadlines below it so Smithy can finish
+// response-body cleanup before net/http cancels the transport.
+const DynamoDBHTTPClientTimeout = 60 * time.Second
+
 type DynamoDBWriter struct {
 	table   string
 	client  *dynamodb.Client
@@ -107,7 +112,10 @@ type EngineStatus struct {
 //     within the existing context budget instead of failing the run.
 func NewDynamoDBClient(ctx context.Context, optFns ...func(*config.LoadOptions) error) (*dynamodb.Client, error) {
 	httpClient := awshttp.NewBuildableClient().
-		WithTimeout(15 * time.Second).
+		// Keep the transport ceiling above the longest operation deadline. If
+		// both expire together, net/http cancels the body while Smithy is
+		// draining it and emits misleading discard/close warnings.
+		WithTimeout(DynamoDBHTTPClientTimeout).
 		WithTransportOptions(func(t *http.Transport) {
 			t.MaxIdleConns = 32
 			t.MaxIdleConnsPerHost = 16
