@@ -39,6 +39,7 @@ const (
 	haltControlNamespace = "cluster-optimizer"
 	haltControlConfigMap = "cluster-optimizer-halt"
 	haltControlKey       = "halt"
+	reportQueryTimeout   = 45 * time.Second
 )
 
 //go:embed static
@@ -391,7 +392,10 @@ func (s *server) handleReports(w http.ResponseWriter, r *http.Request) {
 	statusCh := make(chan statusResult, 1)
 
 	go func() {
-		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		// This query can span several 1 MB DynamoDB pages when report_json
+		// payloads are large. Its old 15s budget regularly expired during body
+		// cleanup, producing Smithy response-body warnings on every UI poll.
+		ctx, cancel := context.WithTimeout(r.Context(), reportQueryTimeout)
 		defer cancel()
 		reports, rollups, err := s.reportsAndRollups(ctx, clusterID)
 		reportsCh <- reportsResult{reports: reports, rollups: rollups, err: err}

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GipsyChef/cluster-optimizer/internal/store"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -336,6 +337,12 @@ func TestDashboardRefreshesReportsAndRelativeTimes(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard script is missing %q", want)
 		}
+	}
+}
+
+func TestReportQueryDeadlinePrecedesHTTPClientTimeout(t *testing.T) {
+	if reportQueryTimeout >= store.DynamoDBHTTPClientTimeout {
+		t.Fatalf("report query timeout %s must be below HTTP client timeout %s", reportQueryTimeout, store.DynamoDBHTTPClientTimeout)
 	}
 }
 
