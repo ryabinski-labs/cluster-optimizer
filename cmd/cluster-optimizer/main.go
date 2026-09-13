@@ -190,6 +190,11 @@ func run(ctx context.Context, args []string) error {
 		nudgeOpts := nudger.NewOptions()
 		nudgeOpts.Live = nudgeLive
 		nudgeOpts.CordonTTL = cordonTTL
+		// The nudger is only allowed to carry out a drain this run's capacity
+		// engine authorised for the node's pool. Without the verdict it
+		// refuses, so the mutating path can never outrun the conservative
+		// reporting path that honours the floor and survive-loss rule.
+		nudgeOpts.Capacity = &capacityResult
 		nudgeResult, err := nudger.NudgePodsWithResult(ctx, clientset, nudgeOpts)
 		if err != nil {
 			return fmt.Errorf("active nudging failed: %w", err)

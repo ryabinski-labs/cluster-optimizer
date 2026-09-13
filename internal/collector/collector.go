@@ -134,10 +134,10 @@ func collectNodes(ctx context.Context, clientset *kubernetes.Clientset) ([]model
 			DiskPressure:         hasDiskPressure(node),
 			Labels:               node.Labels,
 			Taints:               nodeTaints(node),
-			Pool:                 nodePool(node),
+			Pool:                 NodePoolName(node.Labels),
 			Zone:                 nodeZone(node),
 			Unschedulable:        node.Spec.Unschedulable,
-			Ready:                nodeReady(node),
+			Ready:                NodeReady(node),
 			AllocatableExtended:  extendedAllocatable(node.Status.Allocatable),
 			MaxPods:              node.Status.Allocatable.Pods().Value(),
 		}

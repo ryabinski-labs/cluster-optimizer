@@ -128,10 +128,13 @@ Two cases where you should still intervene:
 
 - **The halt switch is set.** Halt means the optimizer touches nothing,
   including the reaper. Uncordon by hand, or clear the halt.
-- **`uncordon_stale` rows keep appearing for the same node.** Consolidation is
-  working and nothing is removing the drained node. Either enable an
-  autoscaler, remove the node yourself, or turn nudging off — as it stands the
-  cluster is being drained and refilled for no saving.
+- **`uncordon_stale` rows keep appearing.** Consolidation is working and
+  nothing is removing the drained node. The nudger already refuses to drain a
+  pool whose capacity verdict has no spare node, and it benches the whole pool
+  that had a cordon reaped for `DefaultRecordonCooldown` (2h), so repeated rows
+  mean the autoscaler or operator is not actually removing drained nodes.
+  Either fix or enable the autoscaler, remove a node yourself, or turn nudging
+  off — as it stands the cluster is being drained and refilled for no saving.
 
 To disable reaping entirely and restore the previous
 cordon-and-leave-it behaviour, set `CLUSTER_OPTIMIZER_CORDON_TTL=0`.
@@ -399,3 +402,6 @@ as a bug:
   fails for any non-NotFound reason.
 - Delete or resize a node, call the DigitalOcean API, or write to DynamoDB
   beyond report and recommendation rows.
+- Evict its own pod, or cordon the node its pod is running on. The optimizer's
+  namespace is excluded from the relocatable set and its host is never a drain
+  candidate.

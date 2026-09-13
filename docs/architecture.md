@@ -65,7 +65,11 @@ mutation requires two independent gates AND a halt-ConfigMap check.
   pre-flights PDBs. Every cordon is stamped with ownership annotations in
   the same API write that sets `Unschedulable`, so no cordon this tool
   places can become unattributable; a reaper reverses its own cordons once
-  they outlive `CLUSTER_OPTIMIZER_CORDON_TTL`.
+  they outlive `CLUSTER_OPTIMIZER_CORDON_TTL`. A drain is only attempted when
+  the same run's capacity verdict marks the node's pool actionable with a
+  usable node to spare, and a reaped cordon benches the whole pool for
+  `DefaultRecordonCooldown` — the mutating path can never be less
+  conservative than the reported plan.
 - PR-gated remediator (`cmd/api-yml-remediator`): patches workload
   manifests in user-owned application repositories. Now supports
   Deployment, DaemonSet, and StatefulSet kinds, and refuses any name in
@@ -116,7 +120,9 @@ mutation requires two independent gates AND a halt-ConfigMap check.
 | Nudger cordons a node that would violate a PDB | Medium | Pre-flight: lists matching PDBs and aborts if `DisruptionsAllowed=0`; PDB list errors are also treated as blockers |
 | Run dies between cordon and evict, stranding a node unschedulable forever | High | Ownership annotations are written in the same API update as the cordon, so every cordon is attributable; the next run reaps any of ours older than `CLUSTER_OPTIMIZER_CORDON_TTL` and restores the pre-cordon state |
 | Drain succeeds but nothing removes the node, so the cordon becomes permanent lost capacity | Medium | Same reaper: a cordon with no follow-through is treated as abandoned, not as work in progress, and each reversal writes an `uncordon_stale` audit row so the pattern is visible |
-| Reaper and nudger oscillate on the same node, re-evicting pods every cycle | Medium | A reaped node is barred from being drained again for `DefaultRecordonCooldown` (2h) while remaining a valid destination for pods |
+| The nudger's request-only model drains a node the capacity engine refused to give back | High | A candidate must clear the same run's per-pool verdict: `Actionable` evidence and more usable nodes than `MinimumSafeNodes`; a pool carrying a cordoned/NotReady node is refused. Without a supplied verdict the pass refuses to consolidate at all, so the mutating path can never be looser than the reported plan |
+| Nudger evicts its own CronJob pod, dies mid-pass, and strands the cordon | High | Pods in the tool's own namespace (`SelfNamespace`, defaulting to the halt-switch namespace) are never relocatable and their host can never be a drain candidate, so the running job cannot cordon or evict the node it lives on; the self pod's footprint stays charged to its host so draining a peer cannot pack into space the optimizer occupies |
+| Reaper and nudger oscillate on the same node — or the next run drains a different node in the same pool | Medium | A reaped cordon bars **the whole pool** from being drained again for `DefaultRecordonCooldown` (2h) while remaining a valid destination for pods, because the failure the reaper detects is "nothing is removing drained nodes", not "this node is bad" |
 | Reaper reverses a cordon an operator placed deliberately | Medium | Only cordons carrying `cluster-optimizer.io/cordoned-at` are eligible; `prior-unschedulable` preserves a pre-existing cordon underneath ours |
 | RBAC drift adds patch verbs to wrong role | Medium | Applier RBAC split into separate `rbac-applier.yaml`; base `rbac.yaml` has read/list/watch plus node-update and pods/eviction for nudging only |
 | Provider-specific node pricing is absent | Medium | Keep cost effect qualitative until provider adapters ship |

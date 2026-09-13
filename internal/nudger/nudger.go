@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/GipsyChef/cluster-optimizer/internal/applier"
+	"github.com/GipsyChef/cluster-optimizer/internal/capacity"
+	"github.com/GipsyChef/cluster-optimizer/internal/collector"
 	corev1 "k8s.io/api/core/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -27,6 +29,14 @@ type Options struct {
 	HaltNamespace string
 	HaltConfigMap string
 	HaltKey       string
+	// SelfNamespace is the namespace this tool runs in. Pods found there are
+	// the optimizer's own: they are never part of the relocatable set (the
+	// process would evict itself), their capacity is still charged to their
+	// host, and no node hosting one may be cordoned — cordoning the node out
+	// from under the running job kills the run mid-pass and strands the
+	// cordon with nothing in the audit log to explain it. Empty disables the
+	// check; NewOptions defaults it to the halt-switch namespace.
+	SelfNamespace string
 	// CordonTTL is how long a cordon this tool placed may stand before the
 	// reaper reverses it. Zero disables reaping entirely, which restores the
 	// pre-reaper behaviour of leaving cordons in place indefinitely.
@@ -34,6 +44,13 @@ type Options struct {
 	// RecordonCooldown keeps a reaped node out of the candidate set for a
 	// while, so reaping cannot become a cordon/evict/uncordon loop.
 	RecordonCooldown time.Duration
+	// Capacity is this run's pool-level verdict from the capacity engine.
+	// Consolidation is gated on it: a node is only a candidate when its pool
+	// has an actionable verdict and at least one usable node to spare, so the
+	// mutating path can never be less conservative than the plan the same run
+	// reports. Nil means no verdict was supplied; the pass then refuses to
+	// consolidate rather than trusting the nudger's own, request-only model.
+	Capacity *capacity.Result
 	// RunID identifies this invocation on the cordons it places. Left empty,
 	// NudgePodsWithResult generates one.
 	RunID string
@@ -49,6 +66,7 @@ func NewOptions() Options {
 		HaltNamespace:    applier.DefaultHaltNamespace,
 		HaltConfigMap:    applier.DefaultHaltConfigMap,
 		HaltKey:          applier.DefaultHaltKey,
+		SelfNamespace:    applier.DefaultHaltNamespace,
 		CordonTTL:        DefaultCordonTTL,
 		RecordonCooldown: DefaultRecordonCooldown,
 	}
@@ -137,6 +155,19 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 		log.Printf("Active Nudger DRY-RUN: would reverse %d stale cordon(s): %v", len(result.Reap.Uncordoned), result.Reap.Uncordoned)
 	}
 
+	// The capacity engine's verdict is the enforcement gate for this pass.
+	// The nudger's own simulation answers only "would these pods fit
+	// elsewhere?"; it deliberately ignores the configured floor, the
+	// survive-one-loss rule, pinned pods and weak usage evidence, so on its
+	// own it will happily drain a node the engine has already refused to give
+	// back. Refusing to run without the verdict keeps the mutating path from
+	// ever being looser than the plan the same run reports.
+	if opts.Capacity == nil {
+		log.Println("Active Nudger: no capacity engine verdict supplied for this run; refusing to consolidate")
+		result.NotFeasibleReason = "capacity engine verdict not supplied"
+		return result, nil
+	}
+
 	// 1. Fetch all nodes. This runs after the reap so any node just returned
 	// to service counts toward the packing simulation below.
 	nodeList, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -159,6 +190,7 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 	type nodeState struct {
 		node           corev1.Node
 		name           string
+		pool           string
 		allocatableCPU int64 // millicores
 		allocatableMem int64 // MiB
 		requestedCPU   int64 // millicores
@@ -166,6 +198,7 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 		freeCPU        int64 // millicores
 		freeMem        int64 // MiB
 		isSchedulable  bool
+		hostsSelf      bool
 		activePods     []corev1.Pod
 	}
 
@@ -173,15 +206,46 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 	for _, node := range nodeList.Items {
 		cpu := node.Status.Allocatable.Cpu().MilliValue()
 		mem := node.Status.Allocatable.Memory().Value() / 1024 / 1024 // bytes to MiB
-		isSchedulable := !node.Spec.Unschedulable
+		isSchedulable := !node.Spec.Unschedulable && collector.NodeReady(node)
 
 		nodesMap[node.Name] = &nodeState{
 			node:           node,
 			name:           node.Name,
+			pool:           collector.NodePoolName(node.Labels),
 			allocatableCPU: cpu,
 			allocatableMem: mem,
 			isSchedulable:  isSchedulable,
 			activePods:     []corev1.Pod{},
+		}
+	}
+
+	// 3b. Aggregate live per-pool health. The capacity engine reasons about
+	// pools, so the gate that consumes its verdict must too: a node inherits
+	// its pool's constraints, including a cordon the reaper recently returned.
+	type poolState struct {
+		schedulable    int
+		unusable       int
+		reapedRecently bool
+	}
+	pools := make(map[string]*poolState)
+	for _, ns := range nodesMap {
+		ps := pools[ns.pool]
+		if ps == nil {
+			ps = &poolState{}
+			pools[ns.pool] = ps
+		}
+		if ns.isSchedulable {
+			ps.schedulable++
+		} else {
+			ps.unusable++
+		}
+		if !ps.reapedRecently && inRecordonCooldown(ns.node, opts.RecordonCooldown, now) {
+			// One reaped cordon in a pool is enough to bench the whole pool:
+			// the failure it detects — a drained node that nothing removed —
+			// says nothing about which node the next run would pick, so
+			// allowing another node in the same pool is how the documented
+			// drain/refill ping-pong starts.
+			ps.reapedRecently = true
 		}
 	}
 
@@ -217,6 +281,17 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 
 		ns.requestedCPU += podCPU
 		ns.requestedMem += podMem
+
+		// The optimizer's own pods are never part of the relocatable set: a
+		// drain that evicts the process running it dies before it can record
+		// anything, leaving the cordon behind. They are still charged for the
+		// capacity they occupy, because their host may need to absorb pods
+		// from a different node.
+		if opts.SelfNamespace != "" && pod.Namespace == opts.SelfNamespace {
+			ns.hostsSelf = true
+			continue
+		}
+
 		ns.activePods = append(ns.activePods, pod)
 	}
 
@@ -254,23 +329,63 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 	// 5. Filter nodes that are candidates for emptying.
 	// We want to find a node whose relocatable pods can be completely rescheduled onto the other *schedulable* nodes.
 	// Two distinct questions, deliberately separated: which nodes can receive
-	// pods, and which nodes may be emptied. A node in re-cordon cooldown is
-	// still perfectly good capacity — it just must not be drained again yet.
+	// pods, and which nodes may be emptied. Nodes in a benched pool are still
+	// perfectly good capacity — they just must not be drained again yet.
+	//
+	// A candidate must clear the capacity engine's verdict for its pool, not
+	// just the packing simulation below. The simulation is a placement check;
+	// the verdict is the enforcement decision, and it is the stricter of the
+	// two by construction: it honours the configured floor, the
+	// survive-one-loss rule, pinned workloads and usage-evidence quality.
+	verdicts := make(map[string]capacity.PoolVerdict, len(opts.Capacity.Pools))
+	for _, verdict := range opts.Capacity.Pools {
+		verdicts[verdict.Pool] = verdict
+	}
+
 	var schedulableCount int
 	var candidateNodes []*nodeState
+	blockedPools := map[string]string{}
 	for _, ns := range nodesMap {
 		if !ns.isSchedulable {
-			continue // Node is already cordoned
+			continue // Node is cordoned or not Ready
 		}
 		schedulableCount++
-		if inRecordonCooldown(ns.node, opts.RecordonCooldown, now) {
-			// The reaper recently returned this node to service. Re-draining
-			// it now would evict the same pods again and land us back where
-			// we started, so leave it alone until the cooldown expires.
-			log.Printf("Active Nudger: node %q is in re-cordon cooldown after a stale-cordon reap; skipping as a drain candidate", ns.name)
+
+		// Never cordon the node this process is running on. Even with the
+		// self namespace excluded from eviction, cordoning it would stop the
+		// next attempt from scheduling there and the drained node would have
+		// no follow-through; the run that did it would also die mid-pass
+		// before its audit row was written.
+		if ns.hostsSelf {
+			log.Printf("Active Nudger: node %q runs the optimizer's own pod; refusing to cordon the node out from under this run", ns.name)
 			continue
 		}
-		candidateNodes = append(candidateNodes, ns)
+
+		verdict, hasVerdict := verdicts[ns.pool]
+		ps := pools[ns.pool]
+		switch {
+		case !hasVerdict:
+			blockedPools[ns.pool] = "the capacity engine reported no verdict for this pool"
+		case !verdict.Actionable:
+			blockedPools[ns.pool] = fmt.Sprintf("the capacity verdict is not actionable (status %s, usage evidence %s)", verdict.Status, verdict.UsageFidelity)
+		case ps.unusable > 0:
+			blockedPools[ns.pool] = fmt.Sprintf("%d node(s) in the pool are cordoned or not Ready; the pool must return to health before another node is drained", ps.unusable)
+		case ps.schedulable <= verdict.MinimumSafeNodes:
+			blockedPools[ns.pool] = fmt.Sprintf("the pool needs at least %d of its %d usable node(s); there is no spare to give back", verdict.MinimumSafeNodes, ps.schedulable)
+		case ps.reapedRecently:
+			blockedPools[ns.pool] = fmt.Sprintf("a cordon in the pool was reaped within the last %s; nothing is removing drained nodes", opts.RecordonCooldown)
+		default:
+			candidateNodes = append(candidateNodes, ns)
+		}
+	}
+
+	blockedNames := make([]string, 0, len(blockedPools))
+	for pool := range blockedPools {
+		blockedNames = append(blockedNames, pool)
+	}
+	sort.Strings(blockedNames)
+	for _, pool := range blockedNames {
+		log.Printf("Active Nudger: pool %q is not a drain source this pass: %s", pool, blockedPools[pool])
 	}
 
 	if schedulableCount < 2 {
@@ -279,8 +394,8 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 		return result, nil
 	}
 	if len(candidateNodes) == 0 {
-		log.Println("Active Nudger: Every schedulable node is in re-cordon cooldown. Nothing to consolidate this pass.")
-		result.NotFeasibleReason = "all schedulable nodes are in re-cordon cooldown"
+		log.Println("Active Nudger: No pool currently has a spare node to give back. Nothing to consolidate this pass.")
+		result.NotFeasibleReason = noDrainablePoolReason(blockedPools)
 		return result, nil
 	}
 
@@ -437,6 +552,23 @@ func NudgePodsWithResult(ctx context.Context, clientset kubernetes.Interface, op
 
 	log.Printf("Active Nudger: Consolidation of node %q initiated successfully.\n", targetNodeToEmpty.name)
 	return result, nil
+}
+
+// noDrainablePoolReason is the audit-log reason for a pass in which the
+// capacity gate refused every pool. It names the first blocked pool
+// alphabetically (not map-order) so successive runs produce a stable string
+// and the remediation feed does not look like random noise.
+func noDrainablePoolReason(blocked map[string]string) string {
+	if len(blocked) == 0 {
+		return "no node consolidation is currently feasible"
+	}
+	names := make([]string, 0, len(blocked))
+	for name := range blocked {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return fmt.Sprintf("no drainable pool (%d pool(s) blocked, including %q: %s)",
+		len(blocked), names[0], blocked[names[0]])
 }
 
 // nudgerHaltCheck consults the same configmap the applier uses. Fail
