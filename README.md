@@ -401,14 +401,33 @@ or an operator can remove it. If nothing removes the node, the cordon is not
 work in progress — it is lost scheduling capacity that nothing will ever notice.
 The same is true if the CronJob pod dies between cordoning and evicting.
 
+Consolidation is gated on the same-run capacity verdict: the nudger only
+drains a node whose pool the capacity engine reports **actionable** with a
+usable node to spare. If the engine says the pool cannot give a node back —
+the floor is what stops it, the workload would not survive a node loss, or the
+usage evidence is too weak to act on — the pass refuses to cordon anything,
+even when the nudger's own request-only simulation thinks the pods would fit.
+A pool already carrying a cordoned or NotReady node is refused too: the pool
+returns to health before another of its nodes is drained. The mutating path is
+never allowed to be less conservative than the plan the same run reports.
+
+The optimizer's own pods (in the halt-switch namespace, `cluster-optimizer` by
+default) are never treated as relocatable, and a node running one is never a
+drain candidate: evicting the process that is doing the consolidating would
+kill the run mid-pass and leave the cordon with nothing in the audit log to
+explain it. Their capacity still counts against the host, so draining a peer
+cannot pack pods into space the optimizer is occupying.
+
 So at the start of every pass, before considering any new target, the nudger
 reverses cordons **it placed** that have stood longer than
 `CLUSTER_OPTIMIZER_CORDON_TTL` (default `30m`; set `0` to disable reaping). It
 restores the node's pre-cordon schedulability, clears its own annotations, and
 writes an `uncordon_stale` row to the remediation audit log. A node the reaper
-just returned to service is excluded from being drained again for two hours, so
-reaping cannot become a cordon/evict/uncordon loop — it stays a valid
-destination for pods throughout.
+just returned to service is excluded from being drained again for two hours,
+and because the signal is "nothing removed the drained node" rather than "this
+node is bad", the whole pool it belongs to is benched for the same window —
+draining a different node in that pool is how the drain/refill ping-pong
+starts. The reaped node stays a valid destination for pods throughout.
 
 Cordons without these annotations are never touched: an unannotated cordon is
 an operator's deliberate act. A run of `uncordon_stale` rows in the UI is the

@@ -82,7 +82,10 @@ spec:
                 # How long a cordon this tool placed may stand before the next
                 # run reverses it and gives the capacity back. Covers both a
                 # run that died mid-drain and a drain nothing ever acted on.
-                # Set to 0 to never reap.
+                # A reap also benches the node's whole pool from further
+                # drains for two hours, so a pool whose nodes are never
+                # removed stops being drained over and over. Set to 0 to
+                # never reap.
                 # - name: CLUSTER_OPTIMIZER_CORDON_TTL
                 #   value: "30m"
               volumeMounts:

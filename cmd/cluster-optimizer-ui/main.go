@@ -211,7 +211,7 @@ type server struct {
 	table              string
 	region             string
 	client             *dynamodb.Client
-	kubeClient         *kubernetes.Clientset
+	kubeClient         kubernetes.Interface
 	static             http.Handler
 	remediationTargets map[string]remediationTarget
 	minRemediationDays int
@@ -668,14 +668,16 @@ func (s *server) readLiveHalt(ctx context.Context) liveHaltResult {
 	return liveHaltResult{err: lastErr}
 }
 
-// invalidateEngineStatus drops any cached engine_status for clusterID so the
-// next read recomputes against authoritative sources. Called by handleHalt
-// immediately after a successful ConfigMap mutation so the dashboard tab
-// that issued the toggle observes the new state on its next poll without
-// waiting for the cache to expire.
-func (s *server) invalidateEngineStatus(clusterID string) {
+// invalidateAllEngineStatus drops every cached engine_status entry. The halt
+// ConfigMap is cluster-independent — one switch governs every cluster_id the
+// dashboard can be pointed at — so a toggle must not leave another cluster's
+// cached pre-toggle halt state in place. Invalidating only the hardcoded
+// "default" entry let a dashboard watching any other cluster_id serve
+// halt_active=false for up to the cache TTL, reverting the pill until the next
+// 60s reports poll.
+func (s *server) invalidateAllEngineStatus() {
 	s.engineStatusMu.Lock()
-	delete(s.engineStatusCache, clusterID)
+	s.engineStatusCache = map[string]*engineStatusCacheEntry{}
 	s.engineStatusMu.Unlock()
 }
 
@@ -756,10 +758,10 @@ func (s *server) handleHalt(w http.ResponseWriter, r *http.Request) {
 		log.Printf("halt: deactivated by UI client %s", r.RemoteAddr)
 	}
 
-	// Drop the engine_status cache so the next /api/reports poll
-	// recomputes against the new ConfigMap state without waiting for
-	// the TTL to expire.
-	s.invalidateEngineStatus("default")
+	// Drop every cached engine_status entry so the next /api/reports poll
+	// from any tab, for any cluster_id, recomputes against the new
+	// ConfigMap state without waiting for the TTL to expire.
+	s.invalidateAllEngineStatus()
 
 	writeJSON(w, http.StatusOK, map[string]any{"halt_active": req.Active})
 }

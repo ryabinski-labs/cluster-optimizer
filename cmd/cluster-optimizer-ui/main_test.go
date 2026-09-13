@@ -13,6 +13,7 @@ import (
 
 	"github.com/GipsyChef/cluster-optimizer/internal/store"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 )
 
@@ -244,6 +245,36 @@ func TestHandleHaltRequiresConfirmAndPOST(t *testing.T) {
 	srv.handleHalt(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("POST without kubeClient expected 503, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// The halt ConfigMap is cluster-independent, so toggling it from a tab
+// viewing one cluster_id must not leave another cluster_id serving a cached
+// pre-toggle halt state. handleHalt previously invalidated only the hardcoded
+// "default" entry, so a dashboard watching any other cluster_id
+// (e.g. "qa-kind") kept returning halt_active=false and reverted the pill
+// until the next 60s reports poll.
+func TestHandleHaltInvalidatesEveryCachedEngineStatus(t *testing.T) {
+	srv := &server{
+		kubeClient:        fake.NewSimpleClientset(),
+		engineStatusCache: map[string]*engineStatusCacheEntry{},
+	}
+	expiresAt := time.Now().Add(time.Minute)
+	for _, clusterID := range []string{"default", "qa-kind", "prod-west"} {
+		srv.engineStatusCache[clusterID] = &engineStatusCacheEntry{
+			expiresAt: expiresAt,
+			status:    &engineStatus{HaltActive: false},
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/halt", strings.NewReader(`{"active":true,"confirm":true}`))
+	rec := httptest.NewRecorder()
+	srv.handleHalt(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/halt = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(srv.engineStatusCache) != 0 {
+		t.Fatalf("halt toggle left %d cached engine_status entries; another cluster_id keeps a stale halt pill until the next poll", len(srv.engineStatusCache))
 	}
 }
 

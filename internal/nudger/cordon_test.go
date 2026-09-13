@@ -25,9 +25,12 @@ func cordonedNode(name string, age time.Duration, runID string) *corev1.Node {
 			},
 		},
 		Spec: corev1.NodeSpec{Unschedulable: true},
-		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
-		}},
+		Status: corev1.NodeStatus{
+			Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
+			},
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		},
 	}
 }
 
@@ -188,32 +191,9 @@ func TestReapStaleCordons_UnparseableTimestampIsTreatedAsStale(t *testing.T) {
 }
 
 func TestNudgePods_LiveCordonRecordsOwnership(t *testing.T) {
-	node1 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
-		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
-		}},
-	}
-	node2 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
-		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
-		}},
-	}
-	isController := true
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "web-pod", Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "web-rs", Controller: &isController}},
-		},
-		Spec: corev1.PodSpec{
-			NodeName: "node-1",
-			Containers: []corev1.Container{{Name: "app", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("512Mi"),
-			}}}},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
+	node1 := readyNode("node-1", "2", "4Gi")
+	node2 := readyNode("node-2", "2", "4Gi")
+	pod := controlledPod("web-pod", "default", "node-1", nil, "500m", "512Mi")
 	clientset := fake.NewSimpleClientset(node1, node2, pod)
 
 	opts := liveOpts()
@@ -240,36 +220,13 @@ func TestNudgePods_LiveCordonRecordsOwnership(t *testing.T) {
 
 func TestNudgePods_SkipsNodeInRecordonCooldown(t *testing.T) {
 	// node-1 was reaped moments ago. Re-cordoning it now would re-evict the
-	// same pods and restart the loop the reaper exists to break.
-	node1 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        "node-1",
-			Annotations: map[string]string{AnnotationCordonReapedAt: reapNow.Add(-10 * time.Minute).Format(time.RFC3339)},
-		},
-		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
-		}},
-	}
-	node2 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-2"},
-		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
-		}},
-	}
-	isController := true
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "web-pod", Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "web-rs", Controller: &isController}},
-		},
-		Spec: corev1.PodSpec{
-			NodeName: "node-1",
-			Containers: []corev1.Container{{Name: "app", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("512Mi"),
-			}}}},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
+	// same pods and restart the loop the reaper exists to break — and because
+	// the failure is "nothing removed the drained node", the bench covers the
+	// whole pool, not just node-1.
+	node1 := readyNode("node-1", "2", "4Gi")
+	node1.Annotations = map[string]string{AnnotationCordonReapedAt: reapNow.Add(-10 * time.Minute).Format(time.RFC3339)}
+	node2 := readyNode("node-2", "2", "4Gi")
+	pod := controlledPod("web-pod", "default", "node-1", nil, "500m", "512Mi")
 	clientset := fake.NewSimpleClientset(node1, node2, pod)
 
 	opts := liveOpts()
@@ -278,8 +235,8 @@ func TestNudgePods_SkipsNodeInRecordonCooldown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.TargetNode == "node-1" {
-		t.Fatal("node-1 is in re-cordon cooldown and must not be re-targeted")
+	if result.TargetNode != "" {
+		t.Fatalf("a pool with a recently reaped cordon must not be drained, got target %q", result.TargetNode)
 	}
 	updated, _ := clientset.CoreV1().Nodes().Get(context.Background(), "node-1", metav1.GetOptions{})
 	if updated.Spec.Unschedulable {
@@ -311,30 +268,14 @@ func TestNudgePods_HaltSwitchAlsoBlocksReaping(t *testing.T) {
 }
 
 func TestNudgePods_ReapedNodeCountsTowardCapacity(t *testing.T) {
-	// node-2 is stale-cordoned. Without reaping there is only one schedulable
-	// node and consolidation is impossible; after reaping, node-1's pod has
-	// somewhere to go.
-	node1 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
-		Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
-			corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi"),
-		}},
-	}
+	// node-2 is stale-cordoned by a dead run. The reaper returns it to
+	// service, so node-1's pod has somewhere to go — but the same pass must
+	// not immediately drain node-1, because that is exactly the
+	// drain/refill ping-pong: the pool is benched for the cooldown and
+	// consolidation resumes after it.
+	node1 := readyNode("node-1", "2", "4Gi")
 	node2 := cordonedNode("node-2", 2*time.Hour, "dead-run")
-	isController := true
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "web-pod", Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "web-rs", Controller: &isController}},
-		},
-		Spec: corev1.PodSpec{
-			NodeName: "node-1",
-			Containers: []corev1.Container{{Name: "app", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("512Mi"),
-			}}}},
-		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
+	pod := controlledPod("web-pod", "default", "node-1", nil, "500m", "512Mi")
 	clientset := fake.NewSimpleClientset(node1, node2, pod)
 
 	opts := liveOpts()
@@ -346,7 +287,23 @@ func TestNudgePods_ReapedNodeCountsTowardCapacity(t *testing.T) {
 	if len(result.Reap.Uncordoned) != 1 {
 		t.Fatalf("expected node-2's stale cordon to be reaped, got %+v", result.Reap)
 	}
+	if result.TargetNode != "" {
+		t.Fatalf("the pass that reaped a cordon must not drain another node in the same pool, got target %q", result.TargetNode)
+	}
+	reaped, _ := clientset.CoreV1().Nodes().Get(context.Background(), "node-2", metav1.GetOptions{})
+	if reaped.Spec.Unschedulable {
+		t.Fatal("expected node-2 to be schedulable again after the reap")
+	}
+
+	// Once the cooldown expires, consolidation resumes and picks node-1
+	// (node-2 carries no relocatable pods).
+	later := liveOpts()
+	later.now = func() time.Time { return reapNow.Add(DefaultRecordonCooldown + time.Minute) }
+	result, err = NudgePodsWithResult(context.Background(), clientset, later)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if result.TargetNode != "node-1" {
-		t.Fatalf("expected node-1 to become a viable target once node-2 was returned to service, got %q", result.TargetNode)
+		t.Fatalf("expected node-1 to become a viable target once the pool's cooldown expired, got %q", result.TargetNode)
 	}
 }

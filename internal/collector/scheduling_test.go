@@ -34,9 +34,8 @@ func TestNodePool_PrefersProviderLabels(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n", Labels: tc.labels}}
-			if got := nodePool(node); got != tc.want {
-				t.Errorf("nodePool() = %q, want %q", got, tc.want)
+			if got := NodePoolName(tc.labels); got != tc.want {
+				t.Errorf("NodePoolName() = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -44,19 +43,19 @@ func TestNodePool_PrefersProviderLabels(t *testing.T) {
 
 func TestNodeReady_MissingConditionIsNotReady(t *testing.T) {
 	// A node with no Ready condition must not be counted as capacity.
-	if nodeReady(corev1.Node{}) {
+	if NodeReady(corev1.Node{}) {
 		t.Error("a node with no Ready condition must not report ready")
 	}
 	notReady := corev1.Node{Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{
 		{Type: corev1.NodeReady, Status: corev1.ConditionFalse},
 	}}}
-	if nodeReady(notReady) {
+	if NodeReady(notReady) {
 		t.Error("Ready=False must not report ready")
 	}
 	ready := corev1.Node{Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{
 		{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
 	}}}
-	if !nodeReady(ready) {
+	if !NodeReady(ready) {
 		t.Error("Ready=True must report ready")
 	}
 }

@@ -37,19 +37,25 @@ var resourcesTrackedNatively = map[corev1.ResourceName]bool{
 	corev1.ResourcePods: true,
 }
 
-// nodePool returns the node's pool identity. Falls back to the instance type,
-// then to a single synthetic pool, so every node belongs to exactly one group
-// even on clusters that label nothing.
-func nodePool(node corev1.Node) string {
+// NodePoolName returns the node's pool identity from its labels. Falls back to
+// the instance type, then to a single synthetic pool, so every node belongs to
+// exactly one group even on clusters that label nothing.
+//
+// It is exported because every component that reasons about pools — the
+// collector when it stamps model.Node.Pool, and the nudger when it checks a
+// live node against the capacity engine's per-pool verdict — must derive the
+// same name from the same labels. Two implementations that drift would put
+// nodes in pools the capacity engine never evaluated.
+func NodePoolName(labels map[string]string) string {
 	for _, key := range poolLabelKeys {
-		if value := node.Labels[key]; value != "" {
+		if value := labels[key]; value != "" {
 			return value
 		}
 	}
-	if t := node.Labels["node.kubernetes.io/instance-type"]; t != "" {
+	if t := labels["node.kubernetes.io/instance-type"]; t != "" {
 		return "instance-type/" + t
 	}
-	if t := node.Labels["beta.kubernetes.io/instance-type"]; t != "" {
+	if t := labels["beta.kubernetes.io/instance-type"]; t != "" {
 		return "instance-type/" + t
 	}
 	return "default"
@@ -64,7 +70,11 @@ func nodeZone(node corev1.Node) string {
 	return ""
 }
 
-func nodeReady(node corev1.Node) bool {
+// NodeReady reports whether the node's Ready condition is true. A node with
+// no Ready condition at all is treated as not ready rather than assuming
+// capacity that may not exist, and both the collector and the nudger consume
+// this same rule.
+func NodeReady(node corev1.Node) bool {
 	for _, c := range node.Status.Conditions {
 		if c.Type == corev1.NodeReady {
 			return c.Status == corev1.ConditionTrue
