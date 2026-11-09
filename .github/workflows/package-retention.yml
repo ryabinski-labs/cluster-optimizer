@@ -1,0 +1,51 @@
+name: Package retention
+
+# Keep the newest two builds of every image published from this repository.
+# A build is a tagged manifest plus every untagged child manifest it
+# references, and children are deleted only with their own build: buildx
+# publishes an index and its platform/attestation manifests as separate
+# package versions, so deleting a child on its own breaks the image it
+# belongs to. The previous build stays as the rollback copy.
+#
+# Floating tags (main, latest) and the digests under PROTECTED_DIGESTS are
+# never deleted; that list holds the images a deployment is currently pinned
+# to. Update it when a deployment moves to an older image. Run by hand with
+# dry_run=true to print the plan without deleting anything.
+
+on:
+  schedule:
+    - cron: '7 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report only, delete nothing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: package-retention
+  cancel-in-progress: false
+
+jobs:
+  retain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Keep the newest two builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_ORG: ${{ github.repository_owner }}
+          PACKAGES: >-
+            cluster-optimizer
+          KEEP: '2'
+          PROTECTED_DIGESTS: >-
+            sha256:3a7bd21b2421fb47c50150d5064f48ee36f6046d sha256:d311e495c734ae3a0fd57aba06d7dc4d134bef3a6c8906dd5cb124bed6cb120e sha256:9a7262d08006ae4ea4fdf0a6e9e9f6fd4b45a1015627d889e4b973ce24ffa768 sha256:d3937813421c6d6b253e5c09eae10af288501c9d
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python3 .github/scripts/prune-package-versions.py
